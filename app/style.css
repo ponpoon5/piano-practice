@@ -76,6 +76,7 @@ h3 { font-size: 14px; color: var(--fg2); margin: 18px 0 8px; font-weight: 600; }
 .minimap { display: flex; height: 10px; border-radius: 5px; overflow: hidden; gap: 1px; background: var(--bg); }
 .minimap > div { flex: 1; }
 .addbtn { display: block; text-align: center; padding: 18px; border: 2px dashed var(--line); border-radius: 14px; color: var(--fg); cursor: pointer; font-size: 17px; }
+.addnotes { margin-top: 18px; border-color: #3f6f3a; }
 .more { margin-top: 20px; color: var(--fg2); }
 .more summary { cursor: pointer; padding: 6px 0; }
 

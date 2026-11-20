@@ -3,11 +3,14 @@ import * as N from './notes.js';
 import { store } from './store.js';
 import { midi } from './midi.js';
 import { unlockAudio, playNote } from './synth.js';
+import { ClockPlayer } from './clock.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
-const video = $('#video');
+const videoEl = $('#video');
+const clock = new ClockPlayer(); // 動画のない曲で時間を進める
+let video = videoEl; // 今使っている方(動画 か 時計)
 const stage = $('#stage');
 const overlay = $('#overlay');
 
@@ -108,6 +111,7 @@ function renderHome() {
     const map = el('div', { class: 'minimap' }, s.sections.map((_, i) => el('div', { class: 'st-' + L.sectionStatus(s, i, now) })));
     let sub = `合格 ${o.cleared}/${o.sections} 区間`;
     if (o.fullCleared) sub += ' ・ 通し合格';
+    if (s.noVideo) sub = '🎼 音符のみ ・ ' + sub;
     if (due) sub += ` ・ 復習 ${due}`;
     list.append(
       el('div', { class: 'songcard', onclick: () => openSong(s.id) },
@@ -188,6 +192,26 @@ async function addVideo(picked) {
   }
 }
 
+// 音符データだけで曲を作る(動画なし)
+async function addNotesSong(file) {
+  const st = $('#addStatus');
+  try {
+    const nd = N.parseNotesFile(await file.text());
+    const last = nd.notes.reduce((m, n) => Math.max(m, n.t + n.d), 0);
+    const duration = Math.max(nd.duration || 0, last + 1);
+    const id = 'song' + Date.now();
+    const name = (nd.source || file.name).replace(/\.(notes\.)?json$/i, '').replace(/\.[^.]+$/, '');
+    const s = L.newSong({ id, name, duration, now: Date.now() });
+    Object.assign(s, { noVideo: true, notes: nd, handFirst: true, handStreak: 2, tol: 0.25, sound: midi.output ? 'midi' : 'synth' });
+    await store.putSong(s);
+    await store.persist();
+    st.textContent = '';
+    await openSong(id);
+  } catch (e) {
+    st.textContent = '追加できませんでした: ' + e.message;
+  }
+}
+
 async function exportData() {
   const data = { app: 'piano-practice', version: 1, exportedAt: Date.now(), songs: await store.songs(), log };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
@@ -244,16 +268,26 @@ async function openSong(id) {
   $('#home').hidden = true;
   $('#song').hidden = false;
   $('#songTitle').textContent = song.name;
-  const blob = await store.video(id);
+  videoEl.pause();
+  clock.pause();
   const oldUrl = videoUrl;
   videoUrl = null;
-  if (blob) {
-    videoUrl = URL.createObjectURL(blob);
-    video.src = videoUrl;
+  if (song.noVideo) {
+    video = clock;
+    clock.reset(song.duration);
+    videoEl.removeAttribute('src');
+    videoEl.load();
   } else {
-    video.removeAttribute('src');
-    video.load();
-    toast('動画がありません。「設定」から入れ直してください', 5000);
+    video = videoEl;
+    const blob = await store.video(id);
+    if (blob) {
+      videoUrl = URL.createObjectURL(blob);
+      videoEl.src = videoUrl;
+    } else {
+      videoEl.removeAttribute('src');
+      videoEl.load();
+      toast('動画がありません。「設定」から入れ直してください', 5000);
+    }
   }
   if (oldUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
   applySound();
@@ -315,7 +349,10 @@ function fitStage() {
   const portrait = matchMedia('(orientation: portrait), (max-width: 760px)').matches;
   let w = wrap.clientWidth;
   let h = portrait ? Math.min(window.innerHeight * 0.5, w / ar) : wrap.clientHeight;
-  if (w / h > ar) w = h * ar;
+  if (song && song.noVideo) {
+    // 動画がなければ縦横の比にしばられず、空いている所いっぱいに描く
+    if (portrait) h = window.innerHeight * 0.5;
+  } else if (w / h > ar) w = h * ar;
   else h = w / ar;
   stage.style.width = Math.floor(w) + 'px';
   stage.style.height = Math.floor(h) + 'px';
@@ -333,7 +370,7 @@ function clampCrop(c) {
 
 function applyCrop() {
   const c = song ? song.crop : { s: 1, x: 0, y: 0 };
-  video.style.transform = `scale(${c.s}) translate(${-c.x * 100}%, ${-c.y * 100}%)`;
+  videoEl.style.transform = `scale(${c.s}) translate(${-c.x * 100}%, ${-c.y * 100}%)`;
 }
 
 function zoomBy(f) {
@@ -609,7 +646,7 @@ function setupRun(fromT) {
 }
 
 function applySound() {
-  video.muted = hasNotes() && song.sound !== 'video';
+  videoEl.muted = hasNotes() && soundSrc() !== 'video';
 }
 
 function playUnit({ listen = false, fromStart = true } = {}) {
@@ -765,8 +802,14 @@ function stopHere() {
 
 function togglePlay() {
   if (tab === 'edit') {
-    if (video.paused) video.play();
-    else video.pause();
+    unlockAudio();
+    if (video.paused) {
+      editLastT = video.currentTime;
+      video.play();
+    } else {
+      video.pause();
+      midi.allOff();
+    }
     return;
   }
   if (tab !== 'practice') return;
@@ -793,12 +836,27 @@ function togglePlay() {
 
 // ---------- 音符データ・電子ピアノ ----------
 
+// 落ちてくる音符を出すか(動画のない曲はいつも)
+function viewNotes() {
+  return !!(song && (song.viewNotes || song.noVideo));
+}
+
+// 伴奏の音の出どころ(動画のない曲で「動画の音」は選べない)
+function soundSrc() {
+  const s = song.sound || 'video';
+  if (song.noVideo && s === 'video') return midi.output ? 'midi' : 'synth';
+  return s;
+}
+
 function renderHand() {
   const show = hasNotes();
   $('#noteCtl').hidden = !show;
-  $('#keys').hidden = !show || !!song.viewNotes;
-  $('#roll').hidden = !show || !song.viewNotes;
-  video.style.visibility = show && song.viewNotes ? 'hidden' : '';
+  const roll = show && viewNotes();
+  $('#keys').hidden = !show || roll;
+  $('#roll').hidden = !roll;
+  videoEl.style.visibility = roll ? 'hidden' : '';
+  $('#viewNotes').closest('label').hidden = !!song.noVideo;
+  $('#soundSel option[value=video]').disabled = !!song.noVideo;
   if (!show) return;
   const exp = expectedHand();
   for (const b of $$('#handSel button')) {
@@ -807,7 +865,7 @@ function renderHand() {
   }
   $('#waitMode').checked = !!song.waitMode;
   $('#viewNotes').checked = !!song.viewNotes;
-  $('#soundSel').value = song.sound || 'video';
+  $('#soundSel').value = soundSrc();
   renderMidiStatus();
   sizeCanvases();
 }
@@ -893,12 +951,12 @@ function drawNotes() {
   if (!hasNotes()) return;
   const t = video.currentTime;
   const st = keyState(t);
-  if (song.viewNotes) {
+  if (viewNotes()) {
     const c = $('#roll');
     const ctx = c.getContext('2d');
     const kh = Math.round(c.height * 0.16);
     const l = getLayout(c.width);
-    N.drawFalling(ctx, l, c.width, c.height - kh, song.notes.notes, t, 3 * (video.playbackRate || 1), P.hand);
+    N.drawFalling(ctx, l, c.width, c.height - kh, song.notes.notes, t, 3 * (video.playbackRate || 1), tab === 'practice' ? P.hand : 'B');
     N.drawKeyboard(ctx, l, 0, c.height - kh, c.width, kh, st);
   } else {
     const c = $('#keys');
@@ -909,17 +967,19 @@ function drawNotes() {
 }
 
 // 伴奏・お手本を iPad かピアノで鳴らす
-function soundNotes(from, to) {
-  if (!hasNotes() || song.sound === 'video' || to <= from) return;
-  if (!P.listen && P.hand === 'B') return;
+// all: 両手とも鳴らす(お手本・区切りの編集)
+function soundNotes(from, to, all = P.listen) {
+  const src = song && soundSrc();
+  if (!hasNotes() || src === 'video' || to <= from) return;
+  if (!all && P.hand === 'B') return;
   const notes = song.notes.notes;
   const rate = video.playbackRate || 1;
   for (let i = firstAtOrAfter(notes, from); i < notes.length && notes[i].t < to; i++) {
     const n = notes[i];
-    if (!P.listen && n.h === P.hand) continue;
-    if (n.t < P.unit.start - 0.01 && !P.listen) continue;
+    if (!all && n.h === P.hand) continue;
+    if (!all && P.unit && n.t < P.unit.start - 0.01) continue;
     const dur = n.d / rate;
-    if (song.sound === 'midi') midi.play(n.p, 72, dur * 1000, n.h === 'L' ? 1 : 0);
+    if (src === 'midi') midi.play(n.p, 72, dur * 1000, n.h === 'L' ? 1 : 0);
     else playNote(n.p, dur);
   }
 }
@@ -1087,7 +1147,7 @@ function renderSettings() {
   } else {
     $('#notesInfo').textContent = 'PC の tools/extract_notes.py で動画から作った .notes.json を取り込むと、電子ピアノでの採点・片手練習・待ってくれるモードが使えます。';
   }
-  $('#btnNotesRemove').hidden = !hasNotes();
+  $('#btnNotesRemove').hidden = !hasNotes() || !!song.noVideo;
   $('#setHandFirst').checked = !!song.handFirst;
   $('#setHandFirst').disabled = !hasNotes();
   $('#setTol').value = String(song.tol || 0.25);
@@ -1149,6 +1209,7 @@ function bindSettings() {
       if (Math.abs(d - song.duration) > 2 && !confirm(`前の動画と長さが違います(${fmt(song.duration)} → ${fmt(d)})。区切りがずれるかもしれません。入れ直しますか？`)) return;
       await store.putVideo(song.id, f);
       song.duration = d;
+      song.noVideo = false;
       saveSong();
       openSong(song.id);
     } catch (err) {
@@ -1176,6 +1237,11 @@ function bindSettings() {
 // ---------- イベント ----------
 
 function bind() {
+  $('#fileAddNotes').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) addNotesSong(f);
+  });
   $('#fileAdd').addEventListener('change', (e) => {
     const f = e.target.files[0];
     e.target.value = '';
@@ -1284,12 +1350,14 @@ function bind() {
   });
   bindSettings();
 
-  video.addEventListener('play', updatePlayButtons);
-  video.addEventListener('pause', updatePlayButtons);
-  video.addEventListener('loadedmetadata', fitStage);
-  video.addEventListener('ended', () => {
-    if (tab === 'practice' && P.mode === 'playing') onUnitEnd();
-  });
+  for (const m of [videoEl, clock]) {
+    m.addEventListener('play', () => m === video && updatePlayButtons());
+    m.addEventListener('pause', () => m === video && updatePlayButtons());
+    m.addEventListener('ended', () => {
+      if (m === video && tab === 'practice' && P.mode === 'playing') onUnitEnd();
+    });
+  }
+  videoEl.addEventListener('loadedmetadata', fitStage);
   window.addEventListener('resize', () => song && fitStage());
 
   document.addEventListener('keydown', (e) => {
@@ -1324,6 +1392,7 @@ function bind() {
 // 練習時間を数える・区間の終わりを見張る
 let lastTick = performance.now();
 let unsavedSec = 0;
+let editLastT = 0;
 function frame(now) {
   if (song) {
     if (tab === 'practice' && P.mode === 'playing' && P.unit && !video.paused) {
@@ -1342,7 +1411,13 @@ function frame(now) {
       }
       if (cur >= P.unit.end - 0.03 && P.unit.end < song.duration - 0.1) onUnitEnd();
     }
-    if (tab === 'practice') drawNotes();
+    // 区切りの編集で流しているときも音符を鳴らす(動画のない曲)
+    if (tab === 'edit' && !video.paused) {
+      const cur = video.currentTime;
+      if (cur > editLastT && cur - editLastT < 1) soundNotes(editLastT, cur, true);
+      editLastT = cur;
+    }
+    drawNotes();
     updatePlayhead();
     if (tab === 'edit') {
       $('#editTime').textContent = `${fmt(video.currentTime, true)} / ${fmt(song.duration)}`;
@@ -1373,7 +1448,7 @@ setInterval(() => {
 }, 400);
 
 async function init() {
-  globalThis.__pp = { P, midi }; // 動作確認用
+  globalThis.__pp = { P, midi, get media() { return video; } }; // 動作確認用
   setupVideoInputs();
   bind();
   midi.init();

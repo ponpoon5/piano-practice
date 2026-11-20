@@ -31,6 +31,11 @@
       ＋ 練習する動画を追加
     </label>
     <p class="note">「ファイル」アプリや iCloud Drive にある動画を選びます。動画はこの iPad の中だけに保存されます。</p>
+    <label class="addbtn addnotes">
+      <input type="file" id="fileAddNotes" accept=".json,application/json" hidden>
+      ＋ 音符データだけで追加(動画なし)
+    </label>
+    <p class="note">PC で動画から作った .notes.json を選びます。落ちてくる音符をアプリが描き、お手本・伴奏は iPad かピアノで鳴らします。動画を入れるより軽く、速さも自由に変えられます。</p>
     <div id="addStatus" class="note"></div>
     <details class="more">
       <summary>データの書き出し・読み込み</summary>
