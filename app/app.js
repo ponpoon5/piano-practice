@@ -1,5 +1,8 @@
 import * as L from './logic.js';
+import * as N from './notes.js';
 import { store } from './store.js';
+import { midi } from './midi.js';
+import { unlockAudio, playNote } from './synth.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
@@ -22,7 +25,23 @@ const P = {
   listen: false, // お手本(採点しない・目標の速さ)
   stops: [],
   timer: null,
+  hand: 'B', // 今弾く手 R / L / B
+  scorer: null, // 電子ピアノの採点
+  wait: null, // 待ってくれるモード { chords, i, got, wrong }
+  waiting: false,
+  lastT: 0, // 伴奏を鳴らした所まで(動画の秒)
+  pressed: new Map(), // 今押している鍵 p → ok / bad / free
 };
+
+function hasNotes() {
+  return !!(song && song.notes && song.notes.notes && song.notes.notes.length);
+}
+
+// この単位で今弾くべき手(片手の段階)
+function expectedHand() {
+  if (!hasNotes() || !P.key) return 'B';
+  return L.phaseOf(L.getState(song, P.key));
+}
 
 // ---------- 共通 ----------
 
@@ -215,6 +234,8 @@ async function openSong(id) {
     toast('動画がありません。「設定」から入れ直してください', 5000);
   }
   if (oldUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
+  applySound();
+  lay = null;
   keepAwake();
   setTab('practice');
   renderStrip();
@@ -226,6 +247,9 @@ async function openSong(id) {
 
 async function leaveSong() {
   cancelTimer();
+  midi.allOff();
+  P.key = null;
+  P.unit = null;
   if (!video.paused) video.pause();
   P.mode = 'idle';
   if (wakeLock) {
@@ -274,6 +298,7 @@ function fitStage() {
   stage.style.width = Math.floor(w) + 'px';
   stage.style.height = Math.floor(h) + 'px';
   applyCrop();
+  sizeCanvases();
 }
 
 function clampCrop(c) {
@@ -414,10 +439,17 @@ function selectUnit(key) {
   P.mode = 'idle';
   P.listen = false;
   P.stops = [];
+  P.scorer = null;
+  P.wait = null;
+  P.waiting = false;
+  P.hand = expectedHand();
+  midi.allOff();
+  $('#result').hidden = true;
   song.lastKey = key;
   saveSong();
   overlay.textContent = '';
   seekUnitStart();
+  renderHand();
   renderUnit();
   renderMenu();
   markStrip();
@@ -427,6 +459,7 @@ function seekUnitStart() {
   const t = Math.max(0, P.unit.start - (P.unit.a === 0 && P.unit.start === 0 ? 0 : song.leadIn));
   if (video.readyState > 0) video.currentTime = t;
   else video.addEventListener('loadedmetadata', () => (video.currentTime = t), { once: true });
+  return t;
 }
 
 function renderUnit() {
@@ -437,12 +470,18 @@ function renderUnit() {
   const pct = L.speedPercent(song, P.key);
   const rate = L.rateFor(song, P.key);
   $('#unitSpeed').textContent = `速さ ${pct}%` + (song.targetRate !== 1 ? `(動画×${+rate.toFixed(2)})` : '');
-  const need = P.key.startsWith('s:') ? song.streakToPass : song.chainStreak;
-  $('#unitDots').textContent = st.cleared ? '' : '●'.repeat(st.streak) + '○'.repeat(Math.max(0, need - st.streak));
+  const ph = L.phaseOf(st);
+  const handPhase = hasNotes() && ph !== 'B' && !st.cleared;
+  const need = handPhase ? song.handStreak || 2 : P.key.startsWith('s:') ? song.streakToPass : song.chainStreak;
+  const got = handPhase ? st.hstreak || 0 : st.streak;
+  $('#unitDots').textContent = st.cleared ? '' : '●'.repeat(got) + '○'.repeat(Math.max(0, need - got));
   let hint;
   if (st.cleared) {
     const days = st.next ? Math.max(0, Math.ceil((st.next - Date.now()) / L.DAY)) : 0;
     hint = st.next && st.next <= Date.now() ? '復習の日です。1回弾いて確かめましょう。' : `合格済み。次の復習は${days}日後。`;
+  } else if (handPhase) {
+    const nextPh = L.PHASES[L.PHASES.indexOf(ph) + 1];
+    hint = `${L.PHASE_LABEL[ph]}だけで ◎ をあと${need - got}回 → ${L.PHASE_LABEL[nextPh]}へ`;
   } else {
     const rem = L.remainingOk(song, P.key);
     const last = st.step >= song.steps.length - 1;
@@ -456,13 +495,13 @@ function renderUnit() {
 }
 
 function updatePlayButtons() {
-  const playing = !video.paused || P.mode === 'countdown';
+  const playing = !video.paused || P.mode === 'countdown' || P.waiting;
   $('#btnPlay').textContent = playing ? '⏸ 止める' : '▶ 再生';
   $('#btnEditPlay').textContent = video.paused ? '▶' : '⏸';
   $('.row.grade').classList.toggle('asking', P.mode === 'asking');
 }
 
-const KIND_LABEL = { review: '復習', weak: '止まった', practice: '練習中', new: '新しい', chain: 'つなぎ', full: '通し' };
+const KIND_LABEL = { review: '復習', weak: '苦手', practice: '練習中', new: '新しい', chain: 'つなぎ', full: '通し' };
 
 function renderMenu() {
   const ol = $('#menu');
@@ -476,7 +515,9 @@ function renderMenu() {
     const st = song.progress[it.key];
     const n = st && st.td === today ? st.tn : 0;
     const kind = it.kind === 'pick' ? null : it.kind;
-    const meta = `${L.speedPercent(song, it.key)}%` + (n ? ` ・ 今日${n}回` : '');
+    const ph = hasNotes() && st && !st.cleared ? L.phaseOf(st) : 'B';
+    const phTxt = hasNotes() && ph !== 'B' ? L.PHASE_LABEL[ph] + ' ' : hasNotes() && !st && it.key.startsWith('s:') && song.handFirst ? '右手 ' : '';
+    const meta = phTxt + `${L.speedPercent(song, it.key)}%` + (n ? ` ・ 今日${n}回` : '');
     ol.append(
       el('li', { class: it.key === P.key ? 'cur' : '', onclick: () => selectUnit(it.key) },
         kind ? el('span', { class: 'tag tag-' + kind }, KIND_LABEL[kind]) : el('span', { class: 'tag tag-new' }, '選択中'),
@@ -525,16 +566,45 @@ function countdown(sec, then) {
   }, 1000);
 }
 
+// 電子ピアノの採点・待ちモードの準備
+function setupRun(fromT) {
+  P.scorer = null;
+  P.wait = null;
+  P.waiting = false;
+  P.lastT = fromT;
+  midi.allOff();
+  if (!hasNotes() || P.listen) return;
+  const targets = N.inRange(song.notes.notes, P.unit.start, P.unit.end, P.hand);
+  if (!midi.connected || !targets.length) return;
+  if (song.waitMode) {
+    const chords = N.chords(targets);
+    let i = 0;
+    while (i < chords.length && chords[i].t < fromT - 0.05) i++;
+    P.wait = { chords, i, got: new Set(), wrong: 0 };
+  } else {
+    P.scorer = new N.Scorer(targets, (song.tol || 0.25) * video.playbackRate);
+  }
+}
+
+function applySound() {
+  video.muted = hasNotes() && song.sound !== 'video';
+}
+
 function playUnit({ listen = false, fromStart = true } = {}) {
   if (!P.unit || !video.src) return;
   cancelTimer();
+  unlockAudio();
   P.listen = listen;
   overlay.textContent = '';
+  $('#result').hidden = true;
   video.playbackRate = listen ? song.targetRate : L.rateFor(song, P.key);
+  applySound();
+  let fromT = video.currentTime;
   if (fromStart) {
     P.stops = [];
-    seekUnitStart();
+    fromT = seekUnitStart();
   }
+  setupRun(fromT);
   P.mode = 'playing';
   video.play().catch(() => {
     P.mode = 'idle';
@@ -544,14 +614,45 @@ function playUnit({ listen = false, fromStart = true } = {}) {
   renderUnit();
 }
 
+function showResult(html) {
+  const r = $('#result');
+  r.textContent = html;
+  r.hidden = false;
+}
+
 function onUnitEnd() {
   video.pause();
+  midi.allOff();
   if (P.listen) {
     P.listen = false;
     P.mode = 'idle';
     seekUnitStart();
     renderUnit();
     return;
+  }
+  if (P.wait) {
+    const w = P.wait;
+    P.wait = null;
+    showResult(`待ってくれるモード: 間違えた鍵 ${w.wrong}回(テンポどおりに弾けたら、待たないモードで採点しましょう)`);
+  } else if (P.scorer) {
+    const r = P.scorer.result();
+    P.scorer = null;
+    const g = N.gradeFrom(r);
+    const mark = { ok: '◎', meh: '△', ng: '×' }[g] || '';
+    showResult(`正しい音 ${r.hits}/${r.total} ・ 余分 ${r.extra} → ${mark}`);
+    if (r.missed.length >= 3 && P.unit.kind !== 'spot') {
+      const rate = video.playbackRate;
+      const w = N.worstWindow(r.missed, 2.5 * rate);
+      if (w && w.count >= 3) {
+        const k = L.addSpot(song, w.start - 0.8 * rate, w.end + 0.8 * rate);
+        if (k) setTimeout(() => toast('間違いが多い所を「苦手な所」に足しました'), 1300);
+      }
+    }
+    if (g && !$('#autoLoop').checked) {
+      P.mode = 'idle';
+      doGrade(g);
+      return;
+    }
   }
   if ($('#autoLoop').checked) {
     P.mode = 'idle';
@@ -571,14 +672,25 @@ const EVENT_MSG = {
   reviewed: () => '復習OK。次はもう少し先に',
   'review-meh': () => '明日もう一度復習します',
   relearn: () => '練習し直しましょう',
+  'hand-next': (pct, st) => `${L.PHASE_LABEL[L.phaseOf(st)]}へ進みます`,
+  'spot-cleared': () => '苦手な所を卒業！',
 };
 
 function doGrade(g) {
   if (!P.unit || tab !== 'practice') return;
   if (P.listen) return;
   if (!video.paused) video.pause();
+  midi.allOff();
   cancelTimer();
+  P.waiting = false;
   overlay.textContent = '';
+  // 今の段階と違う手で弾いたときは記録しない
+  if (hasNotes() && P.hand !== expectedHand()) {
+    toast(`自由練習(${L.PHASE_LABEL[P.hand]})なので記録しません`, 1500);
+    P.mode = 'idle';
+    countdown(song.gap, () => playUnit());
+    return;
+  }
   const now = Date.now();
   if (P.unit.kind !== 'section') L.recordRun(song, P.stops.map((i) => i + 1), now);
   if (P.key === 'full' && P.stops.length && g === 'ok') g = 'meh';
@@ -588,12 +700,13 @@ function doGrade(g) {
   state.td = today;
   saveSong();
   renderStrip();
-  if (event) toast(EVENT_MSG[event](L.speedPercent(song, P.key)));
+  if (event) toast(EVENT_MSG[event](L.speedPercent(song, P.key), state));
   else toast({ ok: '◎', meh: '△', ng: '×' }[g], 900);
 
-  if (event === 'cleared' || event === 'reviewed' || event === 'review-meh') {
-    const next = L.buildMenu(song, now).find((x) => x.key !== P.key);
-    renderUnit();
+  if (event === 'cleared' || event === 'reviewed' || event === 'review-meh' || event === 'spot-cleared') {
+    const gone = event === 'spot-cleared';
+    const next = L.buildMenu(song, now).find((x) => x.key !== P.key) || (gone ? { key: L.sectionKey(song, P.unit.a) } : null);
+    if (!gone) renderUnit();
     renderMenu();
     if (next) {
       setTimeout(() => {
@@ -606,6 +719,10 @@ function doGrade(g) {
     P.mode = 'idle';
     updatePlayButtons();
     return;
+  }
+  if (event === 'hand-next') {
+    P.hand = expectedHand();
+    renderHand();
   }
   renderUnit();
   renderMenu();
@@ -634,9 +751,12 @@ function togglePlay() {
     updatePlayButtons();
     return;
   }
-  if (!video.paused) {
-    video.pause();
+  if (!video.paused || P.waiting) {
+    P.waiting = false;
     P.mode = 'idle';
+    video.pause();
+    midi.allOff();
+    updatePlayButtons();
     return;
   }
   if (P.mode === 'asking') {
@@ -645,6 +765,186 @@ function togglePlay() {
   }
   const inside = video.currentTime >= P.unit.start - song.leadIn - 0.1 && video.currentTime < P.unit.end - 0.2;
   playUnit({ fromStart: !inside });
+}
+
+// ---------- 音符データ・電子ピアノ ----------
+
+function renderHand() {
+  const show = hasNotes();
+  $('#noteCtl').hidden = !show;
+  $('#keys').hidden = !show || !!song.viewNotes;
+  $('#roll').hidden = !show || !song.viewNotes;
+  video.style.visibility = show && song.viewNotes ? 'hidden' : '';
+  if (!show) return;
+  const exp = expectedHand();
+  for (const b of $$('#handSel button')) {
+    b.classList.toggle('on', b.dataset.hand === P.hand);
+    b.classList.toggle('phase', b.dataset.hand === exp && exp !== 'B');
+  }
+  $('#waitMode').checked = !!song.waitMode;
+  $('#viewNotes').checked = !!song.viewNotes;
+  $('#soundSel').value = song.sound || 'video';
+  renderMidiStatus();
+  sizeCanvases();
+}
+
+function renderMidiStatus() {
+  const box = $('#midiStatus');
+  if (!box) return;
+  const t = {
+    init: '電子ピアノを確認しています…',
+    unsupported: 'このブラウザは電子ピアノにつなげません(採点は ◎△× を自分で)。iPad では「Web MIDI Browser」アプリでこのページを開くとつながります。',
+    denied: '電子ピアノの使用が許可されませんでした。',
+    none: '電子ピアノが見つかりません。USB でつなぐと、弾いた音で採点します。',
+  }[midi.status];
+  box.textContent = midi.connected ? `🎹 ${midi.inputName} につながっています。${song && song.waitMode ? '正しい鍵を押すまで待ちます。' : '弾くと自動で採点します。'}` : t;
+  const opt = $('#soundSel option[value=midi]');
+  if (opt) opt.disabled = !midi.output;
+}
+
+let lay = null;
+let layW = 0;
+function sizeCanvases() {
+  if (!hasNotes()) return;
+  const dpr = window.devicePixelRatio || 1;
+  for (const c of [$('#keys'), $('#roll')]) {
+    if (c.hidden) continue;
+    const w = Math.round(c.clientWidth * dpr);
+    const h = Math.round(c.clientHeight * dpr);
+    if (w && (c.width !== w || c.height !== h)) {
+      c.width = w;
+      c.height = h;
+    }
+  }
+  layW = 0;
+}
+
+function getLayout(w) {
+  if (!lay || layW !== w) {
+    lay = N.layout(Math.max(21, song.notes.lo - 2), Math.min(108, song.notes.hi + 2), w);
+    layW = w;
+  }
+  return lay;
+}
+
+function keyState(t) {
+  const sounding = new Map();
+  const notes = song.notes.notes;
+  let i = firstAtOrAfter(notes, t - 12);
+  for (; i < notes.length && notes[i].t <= t; i++) {
+    const n = notes[i];
+    if (t < n.t + n.d) sounding.set(n.p, n.h);
+  }
+  const expect = new Map();
+  if (P.wait) {
+    const c = P.wait.chords[P.wait.i];
+    if (c) for (const p of c.ps) if (!P.wait.got.has(p)) expect.set(p, P.hand === 'B' ? handOf(c.t, p) : P.hand);
+  }
+  return { sounding, expect, pressed: P.pressed };
+}
+
+function handOf(t, p) {
+  const notes = song.notes.notes;
+  for (let i = firstAtOrAfter(notes, t - 0.07); i < notes.length && notes[i].t <= t + 0.07; i++) if (notes[i].p === p) return notes[i].h;
+  return 'R';
+}
+
+function firstAtOrAfter(notes, t) {
+  let a = 0;
+  let b = notes.length;
+  while (a < b) {
+    const m = (a + b) >> 1;
+    if (notes[m].t < t) a = m + 1;
+    else b = m;
+  }
+  return a;
+}
+
+function drawNotes() {
+  if (!hasNotes()) return;
+  const t = video.currentTime;
+  const st = keyState(t);
+  if (song.viewNotes) {
+    const c = $('#roll');
+    const ctx = c.getContext('2d');
+    const kh = Math.round(c.height * 0.16);
+    const l = getLayout(c.width);
+    N.drawFalling(ctx, l, c.width, c.height - kh, song.notes.notes, t, 3 * (video.playbackRate || 1), P.hand);
+    N.drawKeyboard(ctx, l, 0, c.height - kh, c.width, kh, st);
+  } else {
+    const c = $('#keys');
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    N.drawKeyboard(ctx, getLayout(c.width), 0, 0, c.width, c.height, st);
+  }
+}
+
+// 伴奏・お手本を iPad かピアノで鳴らす
+function soundNotes(from, to) {
+  if (!hasNotes() || song.sound === 'video' || to <= from) return;
+  if (!P.listen && P.hand === 'B') return;
+  const notes = song.notes.notes;
+  const rate = video.playbackRate || 1;
+  for (let i = firstAtOrAfter(notes, from); i < notes.length && notes[i].t < to; i++) {
+    const n = notes[i];
+    if (!P.listen && n.h === P.hand) continue;
+    if (n.t < P.unit.start - 0.01 && !P.listen) continue;
+    const dur = n.d / rate;
+    if (song.sound === 'midi') midi.play(n.p, 72, dur * 1000, n.h === 'L' ? 1 : 0);
+    else playNote(n.p, dur);
+  }
+}
+
+function onMidiNoteOn(p) {
+  P.pressed.set(p, 'free');
+  if (!song || tab !== 'practice' || !hasNotes()) return;
+  const tv = video.currentTime;
+  if (P.wait && P.mode === 'playing') {
+    const w = P.wait;
+    const c = w.chords[w.i];
+    const early = 0.8 * (video.playbackRate || 1);
+    if (c && c.ps.includes(p) && tv >= c.t - early) {
+      w.got.add(p);
+      P.pressed.set(p, 'ok');
+      if (c.ps.every((q) => w.got.has(q))) {
+        w.i++;
+        w.got.clear();
+        if (P.waiting) {
+          P.waiting = false;
+          video.play();
+        }
+      }
+    } else {
+      w.wrong++;
+      P.pressed.set(p, 'bad');
+    }
+  } else if (P.scorer && P.mode === 'playing' && !video.paused) {
+    P.pressed.set(p, P.scorer.onNote(p, tv) === 'hit' ? 'ok' : 'bad');
+  }
+}
+
+async function importNotes(file) {
+  try {
+    const nd = N.parseNotesFile(await file.text());
+    if (nd.duration && Math.abs(nd.duration - song.duration) > 2 && !confirm(`動画の長さ(${fmt(song.duration)})と音符データの長さ(${fmt(nd.duration)})が違います。別の動画のデータかもしれません。取り込みますか？`)) return;
+    const first = !song.notes;
+    song.notes = nd;
+    if (first) {
+      song.handFirst = true;
+      song.handStreak = song.handStreak || 2;
+      song.tol = song.tol || 0.25;
+      song.sound = song.sound || 'video';
+    }
+    saveSong();
+    lay = null;
+    renderSettings();
+    P.hand = expectedHand();
+    renderHand();
+    const c = N.countHands(nd.notes);
+    toast(`音符 ${nd.notes.length}個を取り込みました(右手 ${c.R}・左手 ${c.L})`, 3000);
+  } catch (e) {
+    alert('取り込めませんでした: ' + e.message);
+  }
 }
 
 // ---------- 区切りの編集 ----------
@@ -743,6 +1043,16 @@ function renderSettings() {
   $('#setChain').value = song.chainStreak;
   $('#setLead').value = song.leadIn;
   $('#setGap').value = song.gap;
+  if (hasNotes()) {
+    const c = N.countHands(song.notes.notes);
+    $('#notesInfo').textContent = `取り込み済み: 音符 ${song.notes.notes.length}個(右手 ${c.R}・左手 ${c.L})${song.notes.source ? ' ・ ' + song.notes.source : ''}`;
+  } else {
+    $('#notesInfo').textContent = 'PC の tools/extract_notes.py で動画から作った .notes.json を取り込むと、電子ピアノでの採点・片手練習・待ってくれるモードが使えます。';
+  }
+  $('#btnNotesRemove').hidden = !hasNotes();
+  $('#setHandFirst').checked = !!song.handFirst;
+  $('#setHandFirst').disabled = !hasNotes();
+  $('#setTol').value = String(song.tol || 0.25);
 }
 
 function bindSettings() {
@@ -847,6 +1157,61 @@ function bind() {
   for (const b of $$('.row.grade button')) b.addEventListener('click', () => doGrade(b.dataset.g));
   $('#btnStopHere').addEventListener('click', stopHere);
 
+  for (const b of $$('#handSel button')) {
+    b.addEventListener('click', () => {
+      P.hand = b.dataset.hand;
+      if (P.mode === 'playing') setupRun(video.currentTime);
+      renderHand();
+      if (P.hand !== expectedHand()) toast(`${L.PHASE_LABEL[P.hand]}の自由練習(記録しません)`, 1800);
+    });
+  }
+  $('#waitMode').addEventListener('change', (e) => {
+    song.waitMode = e.target.checked;
+    saveSong();
+    renderMidiStatus();
+    if (P.mode === 'playing') setupRun(video.currentTime);
+  });
+  $('#viewNotes').addEventListener('change', (e) => {
+    song.viewNotes = e.target.checked;
+    saveSong();
+    renderHand();
+  });
+  $('#soundSel').addEventListener('change', (e) => {
+    song.sound = e.target.value;
+    unlockAudio();
+    applySound();
+    midi.allOff();
+    saveSong();
+  });
+  $('#fileNotes').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) importNotes(f);
+  });
+  $('#btnNotesRemove').addEventListener('click', () => {
+    if (!confirm('この曲の音符データを外します(練習の記録は残ります)。')) return;
+    delete song.notes;
+    song.handFirst = false;
+    for (const st of Object.values(song.progress)) st.phase = 'B';
+    applySound();
+    saveSong();
+    renderSettings();
+    P.hand = 'B';
+    renderHand();
+  });
+  $('#setHandFirst').addEventListener('change', (e) => {
+    song.handFirst = e.target.checked;
+    if (!song.handFirst) for (const st of Object.values(song.progress)) if (st.phase !== 'B') st.phase = 'B';
+    saveSong();
+  });
+  $('#setTol').addEventListener('change', (e) => {
+    song.tol = Number(e.target.value);
+    saveSong();
+  });
+  midi.onNoteOn = onMidiNoteOn;
+  midi.onNoteOff = (p) => P.pressed.delete(p);
+  midi.onChange = renderMidiStatus;
+
   $('#btnEditPlay').addEventListener('click', togglePlay);
   for (const b of $$('[data-seek]')) {
     b.addEventListener('click', () => {
@@ -916,8 +1281,22 @@ let unsavedSec = 0;
 function frame(now) {
   if (song) {
     if (tab === 'practice' && P.mode === 'playing' && P.unit && !video.paused) {
-      if (video.currentTime >= P.unit.end - 0.03 && P.unit.end < song.duration - 0.1) onUnitEnd();
+      const cur = video.currentTime;
+      // 待ってくれるモード: 次の和音が来たら、押すまで止める
+      if (P.wait) {
+        const c = P.wait.chords[P.wait.i];
+        if (c && cur >= c.t - 0.01) {
+          P.waiting = true;
+          video.pause();
+        }
+      }
+      if (cur > P.lastT) {
+        soundNotes(P.lastT, cur);
+        P.lastT = cur;
+      }
+      if (cur >= P.unit.end - 0.03 && P.unit.end < song.duration - 0.1) onUnitEnd();
     }
+    if (tab === 'practice') drawNotes();
     updatePlayhead();
     if (tab === 'edit') {
       $('#editTime').textContent = `${fmt(video.currentTime, true)} / ${fmt(song.duration)}`;
@@ -948,7 +1327,9 @@ setInterval(() => {
 }, 400);
 
 async function init() {
+  globalThis.__pp = { P, midi }; // 動作確認用
   bind();
+  midi.init();
   log = await store.get('log', {});
   await showHome();
   requestAnimationFrame(frame);

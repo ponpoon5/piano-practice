@@ -144,3 +144,39 @@ test('練習時間と連続日数', () => {
   assert.equal(L.streakDays(log, T0 + L.DAY), 2); // 今日まだ弾いていなくても昨日まで続いていれば
   assert.equal(L.streakDays(log, T0 + 2 * L.DAY), 0);
 });
+
+test('片手ずつ: 右手◎2回→左手◎2回→両手', () => {
+  const s = song(60, 15);
+  s.handFirst = true;
+  const k = L.sectionKey(s, 0);
+  assert.equal(L.phaseOf(L.getState(s, k)), 'R');
+  assert.equal(L.remainingOk(s, k), 2);
+  L.grade(s, k, 'ok', T0);
+  L.grade(s, k, 'ng', T0); // 途切れる
+  L.grade(s, k, 'ok', T0);
+  assert.equal(L.grade(s, k, 'ok', T0).event, 'hand-next');
+  assert.equal(L.phaseOf(L.getState(s, k)), 'L');
+  L.grade(s, k, 'ok', T0);
+  assert.equal(L.grade(s, k, 'ok', T0).event, 'hand-next');
+  assert.equal(L.phaseOf(L.getState(s, k)), 'B');
+  assert.equal(L.speedPercent(s, k), 60);
+  for (let i = 0; i < 2; i++) L.grade(s, k, 'ok', T0);
+  assert.equal(L.grade(s, k, 'ok', T0).event, 'speedup');
+  // つなぎは片手の段階なし
+  assert.equal(L.phaseOf(L.getState(s, 'full')), 'B');
+});
+
+test('苦手な所: 足す・重ならない・続けて弾けたら消える', () => {
+  const s = song(60, 15);
+  const k = L.addSpot(s, 20, 23);
+  assert.ok(k);
+  assert.equal(L.addSpot(s, 22, 25), null);
+  const u = L.unitInfo(s, k);
+  assert.equal(u.kind, 'spot');
+  assert.equal(u.label, '苦手な所(区間 2)');
+  assert.equal(L.buildMenu(s, T0)[0].key, k);
+  L.grade(s, k, 'ok', T0);
+  assert.equal(L.grade(s, k, 'ok', T0).event, 'spot-cleared');
+  assert.equal(s.spots.length, 0);
+  assert.equal(L.unitInfo(s, k), null);
+});

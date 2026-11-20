@@ -127,6 +127,14 @@ export function unitInfo(song, key) {
     return { key, kind: 'full', a: 0, b: n - 1, start: 0, end: song.duration, label: '通し' };
   }
   const [t, id1, id2] = key.split(':');
+  if (t === 'm') {
+    const sp = (song.spots || []).find((x) => x.id === id1);
+    if (!sp) return null;
+    const a = sectionIndexAt(song, sp.start);
+    const b = sectionIndexAt(song, Math.max(sp.start, sp.end - 0.01));
+    const mid = sectionIndexAt(song, (sp.start + sp.end) / 2);
+    return { key, kind: 'spot', a, b, start: sp.start, end: sp.end, label: `苦手な所(区間 ${mid + 1})` };
+  }
   const a = idx(song, id1);
   const b = id2 ? idx(song, id2) : a;
   if (a < 0 || b < 0) return null;
@@ -142,12 +150,31 @@ function isChain(key) {
   return !key.startsWith('s:');
 }
 
+// 片手ずつ進めるか(音符データを取り込んだ曲で、区間だけ)
+export const PHASES = ['R', 'L', 'B'];
+export const PHASE_LABEL = { R: '右手', L: '左手', B: '両手' };
+
+export function phaseOf(st) {
+  return st.phase || 'B';
+}
+
+function initialStep(song, key) {
+  const last = song.steps.length - 1;
+  if (key.startsWith('m:')) {
+    const u = unitInfo(song, key);
+    const sec = u && song.progress[sectionKey(song, u.a)];
+    return sec ? Math.min(sec.cleared ? last : sec.step, last) : 0;
+  }
+  return isChain(key) ? Math.max(0, last - 1) : 0;
+}
+
 export function getState(song, key) {
   let st = song.progress[key];
   if (!st) {
-    const last = song.steps.length - 1;
     st = {
-      step: isChain(key) ? Math.max(0, last - 1) : 0,
+      step: initialStep(song, key),
+      phase: song.handFirst && key.startsWith('s:') ? 'R' : 'B',
+      hstreak: 0,
       streak: 0,
       fails: 0,
       cleared: false,
@@ -211,12 +238,33 @@ export function grade(song, key, g, now) {
     return { event, state: st };
   }
 
+  // 片手の段階: 右手→左手→両手
+  const ph = phaseOf(st);
+  if (ph !== 'B') {
+    if (g === 'ok') {
+      st.hstreak = (st.hstreak || 0) + 1;
+      if (st.hstreak >= (song.handStreak || 2)) {
+        st.hstreak = 0;
+        st.phase = PHASES[PHASES.indexOf(ph) + 1];
+        event = 'hand-next';
+      }
+    } else {
+      st.hstreak = 0;
+    }
+    return { event, state: st };
+  }
+
   if (g === 'ok') {
     st.streak++;
     st.fails = 0;
     if (st.streak >= needStreak(song, key)) {
       st.streak = 0;
-      if (st.step < last) {
+      if (key.startsWith('m:')) {
+        // 苦手な所は今の速さで続けて弾ければ卒業
+        song.spots = (song.spots || []).filter((x) => 'm:' + x.id !== key);
+        delete song.progress[key];
+        event = 'spot-cleared';
+      } else if (st.step < last) {
         st.step++;
         event = 'speedup';
       } else {
@@ -242,10 +290,23 @@ export function grade(song, key, g, now) {
   return { event, state: st };
 }
 
+// 苦手な所(小さな区間)を足す。近くに既にあれば足さない
+export function addSpot(song, start, end) {
+  song.spots = song.spots || [];
+  start = Math.max(0, round(start));
+  end = Math.min(song.duration, round(end));
+  if (end - start < 0.5) return null;
+  if (song.spots.some((x) => x.start < end && start < x.end)) return null;
+  const id = newId(song);
+  song.spots.push({ id, start, end });
+  return 'm:' + id;
+}
+
 // あと何回 ◎ で次へ進むか
 export function remainingOk(song, key) {
   const st = getState(song, key);
   if (st.cleared) return 0;
+  if (phaseOf(st) !== 'B') return (song.handStreak || 2) - (st.hstreak || 0);
   return needStreak(song, key) - st.streak;
 }
 
@@ -321,6 +382,9 @@ export function buildMenu(song, now, { maxReview = 4, maxActive = 2 } = {}) {
     .sort((x, y) => x[1].next - y[1].next)
     .slice(0, maxReview);
   for (const [k] of due) add(k, song.progress[k].weak ? 'weak' : 'review');
+
+  // 苦手な所(採点で間違いが集まった所)
+  for (const sp of song.spots || []) add('m:' + sp.id, 'weak');
 
   // 止まった区間(まだ合格していないもの)
   for (let i = 0; i < n; i++) {

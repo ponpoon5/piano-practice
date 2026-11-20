@@ -1,6 +1,6 @@
 // 一度開けば電波がなくても動くようにする。
 // 手元の控えをすぐ返し、裏で新しい版を取りに行く(次に開いたとき新しくなる)。
-const CACHE = 'piano-practice-v1';
+const CACHE = 'piano-practice-v2';
 const FILES = [
   './',
   'index.html',
@@ -8,6 +8,9 @@ const FILES = [
   'app.js',
   'logic.js',
   'store.js',
+  'notes.js',
+  'midi.js',
+  'synth.js',
   'manifest.webmanifest',
   'icon-180.png',
   'icon-192.png',

@@ -61,11 +61,13 @@
       <div id="stageWrap">
         <div id="stage">
           <video id="video" playsinline webkit-playsinline preload="auto"></video>
+          <canvas id="roll" hidden></canvas>
           <div id="overlay"></div>
           <div id="toast"></div>
           <div id="adjustHint" hidden>指1本で動かす・2本でつまんで拡大<button id="btnAdjustDone">決定</button></div>
         </div>
       </div>
+      <canvas id="keys" hidden></canvas>
       <div id="strip"><div id="playhead"></div></div>
     </section>
 
@@ -76,6 +78,22 @@
           <div class="unitlabel"><span id="unitLabel">—</span> <small id="unitRange"></small></div>
           <div class="speedrow"><span id="unitSpeed"></span><span id="unitDots" class="dots"></span></div>
           <div id="unitHint" class="hint"></div>
+          <div id="result" class="result" hidden></div>
+        </div>
+        <div id="noteCtl" hidden>
+          <div class="seg" id="handSel">
+            <button data-hand="R">右手</button><button data-hand="L">左手</button><button data-hand="B">両手</button>
+          </div>
+          <div class="row small">
+            <label class="check"><input type="checkbox" id="waitMode"> 待ってくれる</label>
+            <label class="check"><input type="checkbox" id="viewNotes"> 音符で表示</label>
+            <select id="soundSel" aria-label="音">
+              <option value="video">音: 動画</option>
+              <option value="synth">音: iPad</option>
+              <option value="midi">音: ピアノ</option>
+            </select>
+          </div>
+          <div id="midiStatus" class="note"></div>
         </div>
         <div class="row big">
           <button id="btnPlay" class="primary">▶ 再生</button>
@@ -152,6 +170,18 @@
           <label class="field">区間の前から流す秒<input id="setLead" type="number" min="0" max="5" step="0.5"></label>
           <label class="field">繰り返しの間の秒<input id="setGap" type="number" min="0" max="10" step="0.5"></label>
         </div>
+        <h3>音符データ(電子ピアノで採点・片手練習)</h3>
+        <div id="notesInfo" class="note"></div>
+        <div class="row small">
+          <label class="btnlike">音符データを取り込む<input type="file" id="fileNotes" accept=".json,application/json" hidden></label>
+          <button id="btnNotesRemove" class="danger" hidden>外す</button>
+        </div>
+        <label class="check" style="margin-top:8px"><input type="checkbox" id="setHandFirst"> 新しい区間は 右手→左手→両手 の順に進める</label>
+        <label class="field" style="margin-top:8px">採点の甘さ(ずれてよい秒数)
+          <select id="setTol">
+            <option value="0.15">きびしめ 0.15秒</option><option value="0.25">ふつう 0.25秒</option><option value="0.4">あまめ 0.4秒</option>
+          </select>
+        </label>
         <h3>見え方</h3>
         <div class="row small">
           <button id="btnAdjust">表示範囲を調整</button>
