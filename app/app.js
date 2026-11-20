@@ -147,13 +147,35 @@ function videoDuration(file) {
   });
 }
 
-async function addVideo(file) {
+// iPad/iPhone で Safari 以外(Web MIDI Browser など)から開いているか。
+// こうしたアプリは動画を選ぶときの「写真ライブラリ/撮影」メニューで落ちるので、
+// 動画の種類を指定せずに「ファイル」を直接開かせる(種類が空になるので後で補う)
+const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IOS_MIDI_APP = IOS && !!navigator.requestMIDIAccess;
+
+function setupVideoInputs() {
+  if (!IOS_MIDI_APP) return;
+  for (const id of ['fileAdd', 'fileReplace']) $('#' + id).setAttribute('accept', 'application/octet-stream');
+  const note = $('#fileAdd').closest('.addbtn').nextElementSibling;
+  if (note) note.textContent = '「ファイル」アプリが開きます。写真アプリにある動画は、先に共有→「"ファイル"に保存」で移してください。動画はこの iPad の中だけに保存されます。';
+}
+
+// 種類が空の動画ファイルに種類を付ける(blob のまま再生できるように)
+function asVideo(file) {
+  if (file.type && file.type.startsWith('video/')) return file;
+  const ext = (file.name.match(/\.([^.]+)$/) || [])[1]?.toLowerCase();
+  const type = { mov: 'video/quicktime', m4v: 'video/x-m4v', webm: 'video/webm' }[ext] || 'video/mp4';
+  return file.slice(0, file.size, type);
+}
+
+async function addVideo(picked) {
   const st = $('#addStatus');
+  const file = asVideo(picked);
   try {
     st.textContent = '動画を読み込んでいます…';
     const duration = await videoDuration(file);
     const id = 'song' + Date.now();
-    const name = file.name.replace(/\.[^.]+$/, '');
+    const name = picked.name.replace(/\.[^.]+$/, '');
     const s = L.newSong({ id, name, duration, now: Date.now() });
     st.textContent = '保存しています…(大きい動画は少し時間がかかります)';
     await store.putVideo(id, file);
@@ -1104,9 +1126,10 @@ function bindSettings() {
     saveSong();
   });
   $('#fileReplace').addEventListener('change', async (e) => {
-    const f = e.target.files[0];
+    const picked = e.target.files[0];
     e.target.value = '';
-    if (!f) return;
+    if (!picked) return;
+    const f = asVideo(picked);
     try {
       const d = await videoDuration(f);
       if (Math.abs(d - song.duration) > 2 && !confirm(`前の動画と長さが違います(${fmt(song.duration)} → ${fmt(d)})。区切りがずれるかもしれません。入れ直しますか？`)) return;
@@ -1330,6 +1353,7 @@ setInterval(() => {
 
 async function init() {
   globalThis.__pp = { P, midi }; // 動作確認用
+  setupVideoInputs();
   bind();
   midi.init();
   log = await store.get('log', {});
