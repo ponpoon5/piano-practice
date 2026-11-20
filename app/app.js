@@ -606,7 +606,9 @@ function playUnit({ listen = false, fromStart = true } = {}) {
   }
   setupRun(fromT);
   P.mode = 'playing';
-  video.play().catch(() => {
+  video.play().catch((e) => {
+    // 始まってすぐ止めた(待ってくれるモードで最初の和音を待つ等)ときの中断は失敗ではない
+    if (e && e.name === 'AbortError') return;
     P.mode = 'idle';
     toast('再生できません。もう一度 ▶ を押してください');
     updatePlayButtons();
