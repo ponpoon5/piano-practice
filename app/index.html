@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ピアノ練習">
+<meta name="theme-color" content="#16181d">
+<title>ピアノ練習</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ホーム -->
+<div id="home" class="view">
+  <header class="bar">
+    <h1>ピアノ練習</h1>
+    <div class="spacer"></div>
+    <div id="homeStats" class="stats"></div>
+  </header>
+  <main class="homemain">
+    <div id="songList" class="songlist"></div>
+    <label class="addbtn">
+      <input type="file" id="fileAdd" accept="video/*,.mp4,.mov,.m4v" hidden>
+      ＋ 練習する動画を追加
+    </label>
+    <p class="note">「ファイル」アプリや iCloud Drive にある動画を選びます。動画はこの iPad の中だけに保存されます。</p>
+    <div id="addStatus" class="note"></div>
+    <details class="more">
+      <summary>データの書き出し・読み込み</summary>
+      <p class="note">練習の記録(区切り・進み具合・練習時間)を1つのファイルにします。動画は含みません。</p>
+      <div class="row">
+        <button id="btnExport">記録を書き出す</button>
+        <label class="btnlike">記録を読み込む<input type="file" id="fileImport" accept=".json,application/json" hidden></label>
+      </div>
+      <div id="storageInfo" class="note"></div>
+    </details>
+  </main>
+</div>
+
+<!-- 曲 -->
+<div id="song" class="view" hidden>
+  <header class="bar">
+    <button id="btnBack" class="icon" aria-label="戻る">‹</button>
+    <h2 id="songTitle"></h2>
+    <div class="spacer"></div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="practice" class="on">練習</button>
+      <button data-tab="edit">区切り</button>
+      <button data-tab="record">記録</button>
+      <button data-tab="settings">設定</button>
+    </nav>
+  </header>
+  <main class="songmain">
+    <section class="left">
+      <div id="stageWrap">
+        <div id="stage">
+          <video id="video" playsinline webkit-playsinline preload="auto"></video>
+          <div id="overlay"></div>
+          <div id="toast"></div>
+          <div id="adjustHint" hidden>指1本で動かす・2本でつまんで拡大<button id="btnAdjustDone">決定</button></div>
+        </div>
+      </div>
+      <div id="strip"><div id="playhead"></div></div>
+    </section>
+
+    <aside id="panel">
+      <!-- 練習 -->
+      <div class="tab" data-tab="practice">
+        <div class="unitcard">
+          <div class="unitlabel"><span id="unitLabel">—</span> <small id="unitRange"></small></div>
+          <div class="speedrow"><span id="unitSpeed"></span><span id="unitDots" class="dots"></span></div>
+          <div id="unitHint" class="hint"></div>
+        </div>
+        <div class="row big">
+          <button id="btnPlay" class="primary">▶ 再生</button>
+          <button id="btnAgain">↺ 頭から</button>
+        </div>
+        <div class="row grade">
+          <button data-g="ok" class="g-ok">◎<small>弾けた</small></button>
+          <button data-g="meh" class="g-meh">△<small>おしい</small></button>
+          <button data-g="ng" class="g-ng">×<small>だめ</small></button>
+        </div>
+        <button id="btnStopHere" class="stophere" hidden>✋ ここで止まった</button>
+        <div class="row small">
+          <button id="btnListen">お手本を聞く</button>
+          <label class="check"><input type="checkbox" id="autoLoop"> 採点せず繰り返す</label>
+        </div>
+        <h3>今日のメニュー</h3>
+        <ol id="menu" class="menu"></ol>
+        <p class="note keys">ペダル/キーボード: → ◎ ・ ↓ △ ・ ← × ・ スペース 再生/停止</p>
+      </div>
+
+      <!-- 区切り -->
+      <div class="tab" data-tab="edit" hidden>
+        <div class="transport">
+          <button data-seek="-5">«5</button>
+          <button data-seek="-1">‹1</button>
+          <button id="btnEditPlay" class="primary">▶</button>
+          <button data-seek="1">1›</button>
+          <button data-seek="5">5»</button>
+        </div>
+        <div class="row small">
+          <span id="editTime" class="mono"></span>
+          <label>速さ <select id="editRate">
+            <option value="0.5">0.5</option><option value="0.75">0.75</option>
+            <option value="1" selected>1</option><option value="1.5">1.5</option><option value="2">2</option>
+          </select></label>
+        </div>
+        <button id="btnSplit" class="primary wide">✂ ここで区切る</button>
+        <p class="note">曲のまとまり(フレーズ)の切れ目で区切ると覚えやすくなります。1区間は数小節が目安。</p>
+        <div id="secList" class="seclist"></div>
+        <details class="more">
+          <summary>同じ長さで区切り直す</summary>
+          <div class="row small">
+            <select id="resplitLen">
+              <option value="8">8秒</option><option value="10">10秒</option><option value="15" selected>15秒</option>
+              <option value="20">20秒</option><option value="30">30秒</option><option value="45">45秒</option>
+            </select>
+            <button id="btnResplit">区切り直す</button>
+          </div>
+          <p class="note">この曲の練習の記録は消えます。</p>
+        </details>
+      </div>
+
+      <!-- 記録 -->
+      <div class="tab" data-tab="record" hidden>
+        <div id="recordBody"></div>
+      </div>
+
+      <!-- 設定 -->
+      <div class="tab" data-tab="settings" hidden>
+        <label class="field">曲の名前<input id="setName" type="text"></label>
+        <label class="field">目標の速さ(動画の何倍で弾けたら完成か)
+          <select id="setTarget">
+            <option value="0.75">×0.75</option><option value="1">×1(動画のまま)</option>
+            <option value="1.25">×1.25</option><option value="1.5">×1.5</option><option value="2">×2</option>
+          </select>
+        </label>
+        <p class="note">ゆっくり版の動画(50%速度など)は、まず ×1 で通しを目指し、合格したら上げるのがおすすめです。</p>
+        <label class="field">速さの段階(目標に対する%)<input id="setSteps" type="text" inputmode="decimal" placeholder="60,75,90,100"></label>
+        <div class="row small">
+          <label class="field">区間の合格に要る ◎ の連続<input id="setStreak" type="number" min="1" max="10"></label>
+          <label class="field">つなぎ・通し<input id="setChain" type="number" min="1" max="10"></label>
+        </div>
+        <div class="row small">
+          <label class="field">区間の前から流す秒<input id="setLead" type="number" min="0" max="5" step="0.5"></label>
+          <label class="field">繰り返しの間の秒<input id="setGap" type="number" min="0" max="10" step="0.5"></label>
+        </div>
+        <h3>見え方</h3>
+        <div class="row small">
+          <button id="btnAdjust">表示範囲を調整</button>
+          <button id="btnZoomOut">−</button><button id="btnZoomIn">＋</button>
+          <button id="btnZoomReset">全体</button>
+        </div>
+        <h3>動画</h3>
+        <label class="btnlike">動画を入れ直す<input type="file" id="fileReplace" accept="video/*,.mp4,.mov,.m4v" hidden></label>
+        <h3>やり直し</h3>
+        <div class="row small">
+          <button id="btnResetProgress" class="danger">練習の記録を消す</button>
+          <button id="btnDeleteSong" class="danger">曲を削除</button>
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

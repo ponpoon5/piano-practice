@@ -1,0 +1,960 @@
+import * as L from './logic.js';
+import { store } from './store.js';
+
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
+
+const video = $('#video');
+const stage = $('#stage');
+const overlay = $('#overlay');
+
+let songs = [];
+let log = {};
+let song = null; // 開いている曲
+let videoUrl = null;
+let tab = 'practice';
+
+// 練習の状態
+const P = {
+  key: null,
+  unit: null,
+  mode: 'idle', // idle / playing / asking / countdown
+  listen: false, // お手本(採点しない・目標の速さ)
+  stops: [],
+  timer: null,
+};
+
+// ---------- 共通 ----------
+
+function fmt(t, dec = false) {
+  if (!isFinite(t)) t = 0;
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return dec ? `${m}:${s.toFixed(1).padStart(4, '0')}` : `${m}:${String(Math.floor(s)).padStart(2, '0')}`;
+}
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'style') e.style.cssText = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null) e.append(c);
+  return e;
+}
+
+let toastTimer = null;
+function toast(msg, ms = 2200) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+let saveTimer = null;
+function saveSong() {
+  if (!song) return;
+  clearTimeout(saveTimer);
+  const s = song;
+  saveTimer = setTimeout(() => store.putSong(s).catch((e) => toast('保存できません: ' + e.message, 4000)), 300);
+}
+
+function saveLog() {
+  return store.set('log', log).catch(() => {});
+}
+
+// ---------- ホーム ----------
+
+async function showHome() {
+  await leaveSong();
+  $('#song').hidden = true;
+  $('#home').hidden = false;
+  songs = await store.songs();
+  songs.sort((a, b) => (b.lastOpened || b.createdAt) - (a.lastOpened || a.createdAt));
+  renderHome();
+}
+
+function renderHome() {
+  const now = Date.now();
+  const today = log[L.dateStr(now)]?.sec || 0;
+  $('#homeStats').textContent = `今日 ${Math.round(today / 60)}分 ・ 連続 ${L.streakDays(log, now)}日`;
+  const list = $('#songList');
+  list.textContent = '';
+  for (const s of songs) {
+    const o = L.overall(s);
+    const due = L.buildMenu(s, now).filter((x) => x.kind === 'review' || x.kind === 'weak').length;
+    const map = el('div', { class: 'minimap' }, s.sections.map((_, i) => el('div', { class: 'st-' + L.sectionStatus(s, i, now) })));
+    let sub = `合格 ${o.cleared}/${o.sections} 区間`;
+    if (o.fullCleared) sub += ' ・ 通し合格';
+    if (due) sub += ` ・ 復習 ${due}`;
+    list.append(
+      el('div', { class: 'songcard', onclick: () => openSong(s.id) },
+        el('div', { class: 'name' }, s.name),
+        map,
+        el('div', { class: 'sub' }, sub))
+    );
+  }
+  store.usage().then((u) => {
+    if (u) $('#storageInfo').textContent = `使用中 ${(u.usage / 1e6).toFixed(0)}MB / 使える量 約${(u.quota / 1e9).toFixed(1)}GB`;
+  });
+}
+
+function videoDuration(file) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.muted = true;
+    v.playsInline = true;
+    const url = URL.createObjectURL(file);
+    const done = () => {
+      v.onloadedmetadata = v.onerror = null;
+      v.removeAttribute('src');
+      v.load();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    v.onloadedmetadata = () => {
+      const d = v.duration;
+      done();
+      resolve(d);
+    };
+    v.onerror = () => {
+      done();
+      reject(new Error('この動画は読み込めません'));
+    };
+    v.src = url;
+  });
+}
+
+async function addVideo(file) {
+  const st = $('#addStatus');
+  try {
+    st.textContent = '動画を読み込んでいます…';
+    const duration = await videoDuration(file);
+    const id = 'song' + Date.now();
+    const name = file.name.replace(/\.[^.]+$/, '');
+    const s = L.newSong({ id, name, duration, now: Date.now() });
+    st.textContent = '保存しています…(大きい動画は少し時間がかかります)';
+    await store.putVideo(id, file);
+    await store.putSong(s);
+    await store.persist();
+    st.textContent = '';
+    await openSong(id);
+  } catch (e) {
+    st.textContent = '追加できませんでした: ' + e.message;
+  }
+}
+
+async function exportData() {
+  const data = { app: 'piano-practice', version: 1, exportedAt: Date.now(), songs: await store.songs(), log };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const name = `ピアノ練習の記録_${L.dateStr(Date.now())}.json`;
+  const file = new File([blob], name, { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: name });
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
+  const a = el('a', { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+async function importData(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (data.app !== 'piano-practice') throw new Error('このアプリの記録ではありません');
+    for (const s of data.songs || []) await store.putSong(s);
+    for (const [d, e] of Object.entries(data.log || {})) {
+      if (!log[d] || log[d].sec < e.sec) log[d] = e;
+    }
+    await saveLog();
+    toast('読み込みました');
+    await showHome();
+    const missing = [];
+    for (const s of data.songs || []) if (!(await store.video(s.id))) missing.push(s.name);
+    if (missing.length) $('#addStatus').textContent = '動画がない曲: ' + missing.join('、') + '(曲の「設定」から動画を入れ直してください)';
+  } catch (e) {
+    alert('読み込めませんでした: ' + e.message);
+  }
+}
+
+// ---------- 曲を開く ----------
+
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+  } catch (e) {}
+}
+
+async function openSong(id) {
+  const s = (await store.songs()).find((x) => x.id === id);
+  if (!s) return;
+  song = s;
+  song.lastOpened = Date.now();
+  saveSong();
+  $('#home').hidden = true;
+  $('#song').hidden = false;
+  $('#songTitle').textContent = song.name;
+  const blob = await store.video(id);
+  const oldUrl = videoUrl;
+  videoUrl = null;
+  if (blob) {
+    videoUrl = URL.createObjectURL(blob);
+    video.src = videoUrl;
+  } else {
+    video.removeAttribute('src');
+    video.load();
+    toast('動画がありません。「設定」から入れ直してください', 5000);
+  }
+  if (oldUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
+  keepAwake();
+  setTab('practice');
+  renderStrip();
+  const menu = L.buildMenu(song, Date.now());
+  const first = song.lastKey && L.unitInfo(song, song.lastKey) ? song.lastKey : menu[0]?.key || L.sectionKey(song, 0);
+  selectUnit(first);
+  fitStage();
+}
+
+async function leaveSong() {
+  cancelTimer();
+  if (!video.paused) video.pause();
+  P.mode = 'idle';
+  if (wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+  if (song) {
+    clearTimeout(saveTimer);
+    await store.putSong(song).catch(() => {});
+  }
+  await saveLog();
+  song = null;
+}
+
+function setTab(t) {
+  tab = t;
+  for (const b of $$('#tabs button')) b.classList.toggle('on', b.dataset.tab === t);
+  for (const d of $$('#panel .tab')) d.hidden = d.dataset.tab !== t;
+  cancelTimer();
+  if (!video.paused) video.pause();
+  P.mode = 'idle';
+  overlay.textContent = '';
+  if (t === 'practice') {
+    if (P.key) selectUnit(P.key);
+  } else if (t === 'edit') {
+    video.playbackRate = Number($('#editRate').value);
+    renderSecList();
+  } else if (t === 'record') {
+    renderRecord();
+  } else if (t === 'settings') {
+    renderSettings();
+  }
+  updatePlayButtons();
+}
+
+// ---------- 表示範囲(拡大) ----------
+
+function fitStage() {
+  const wrap = $('#stageWrap');
+  const ar = video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9;
+  const portrait = matchMedia('(orientation: portrait), (max-width: 760px)').matches;
+  let w = wrap.clientWidth;
+  let h = portrait ? Math.min(window.innerHeight * 0.5, w / ar) : wrap.clientHeight;
+  if (w / h > ar) w = h * ar;
+  else h = w / ar;
+  stage.style.width = Math.floor(w) + 'px';
+  stage.style.height = Math.floor(h) + 'px';
+  applyCrop();
+}
+
+function clampCrop(c) {
+  c.s = Math.min(4, Math.max(1, c.s));
+  const m = 1 - 1 / c.s;
+  c.x = Math.min(m, Math.max(0, c.x));
+  c.y = Math.min(m, Math.max(0, c.y));
+  return c;
+}
+
+function applyCrop() {
+  const c = song ? song.crop : { s: 1, x: 0, y: 0 };
+  video.style.transform = `scale(${c.s}) translate(${-c.x * 100}%, ${-c.y * 100}%)`;
+}
+
+function zoomBy(f) {
+  const c = song.crop;
+  const cx = c.x + 0.5 / c.s;
+  const cy = c.y + 0.5 / c.s;
+  c.s *= f;
+  c.x = cx - 0.5 / c.s;
+  c.y = cy - 0.5 / c.s;
+  clampCrop(c);
+  applyCrop();
+  saveSong();
+}
+
+let adjusting = false;
+const pointers = new Map();
+let gesture = null;
+
+function setAdjust(on) {
+  adjusting = on;
+  stage.classList.toggle('adjusting', on);
+  $('#adjustHint').hidden = !on;
+  if (!on) saveSong();
+}
+
+stage.addEventListener('pointerdown', (e) => {
+  if (!adjusting || e.target.closest('button')) return;
+  stage.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  gesture = null;
+});
+stage.addEventListener('pointermove', (e) => {
+  if (!adjusting || !pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  const cur = { x: e.clientX, y: e.clientY };
+  const r = stage.getBoundingClientRect();
+  const c = song.crop;
+  if (pointers.size === 1) {
+    c.x -= (cur.x - prev.x) / (r.width * c.s);
+    c.y -= (cur.y - prev.y) / (r.height * c.s);
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.entries()].map(([id, p]) => (id === e.pointerId ? cur : p));
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    const mx = (a.x + b.x) / 2 - r.left;
+    const my = (a.y + b.y) / 2 - r.top;
+    if (gesture && gesture.d > 0) {
+      const vx = c.x + mx / (r.width * c.s);
+      const vy = c.y + my / (r.height * c.s);
+      c.s *= d / gesture.d;
+      clampCrop(c);
+      c.x = vx - mx / (r.width * c.s);
+      c.y = vy - my / (r.height * c.s);
+    }
+    gesture = { d };
+  }
+  clampCrop(c);
+  applyCrop();
+  pointers.set(e.pointerId, cur);
+});
+const endPointer = (e) => {
+  pointers.delete(e.pointerId);
+  gesture = null;
+};
+stage.addEventListener('pointerup', endPointer);
+stage.addEventListener('pointercancel', endPointer);
+stage.addEventListener(
+  'wheel',
+  (e) => {
+    if (!adjusting) return;
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1);
+  },
+  { passive: false }
+);
+
+// ---------- 区間の帯 ----------
+
+function renderStrip() {
+  const strip = $('#strip');
+  for (const d of $$('.sec', strip)) d.remove();
+  const now = Date.now();
+  song.sections.forEach((s, i) => {
+    const d = el('div', { class: 'sec st-' + L.sectionStatus(song, i, now), style: `flex:${s.end - s.start} 1 0` }, String(i + 1));
+    d.addEventListener('click', () => {
+      if (tab === 'edit') {
+        video.currentTime = s.start;
+        renderSecList();
+      } else {
+        if (tab !== 'practice') setTab('practice');
+        selectUnit(L.sectionKey(song, i));
+      }
+    });
+    strip.append(d);
+  });
+  markStrip();
+}
+
+function markStrip() {
+  const secs = $$('#strip .sec');
+  secs.forEach((d, i) => d.classList.toggle('sel', tab === 'practice' && P.unit && i >= P.unit.a && i <= P.unit.b));
+}
+
+function updatePlayhead() {
+  if (!song || !song.duration) return;
+  const strip = $('#strip');
+  const secs = $$('.sec', strip);
+  const t = video.currentTime;
+  const i = L.sectionIndexAt(song, t);
+  const d = secs[i];
+  if (!d) return;
+  const s = song.sections[i];
+  const f = Math.min(1, Math.max(0, (t - s.start) / (s.end - s.start)));
+  $('#playhead').style.left = d.offsetLeft + f * d.offsetWidth - 1 + 'px';
+}
+
+// ---------- 練習 ----------
+
+function selectUnit(key) {
+  const u = L.unitInfo(song, key);
+  if (!u) return;
+  cancelTimer();
+  if (!video.paused) video.pause();
+  P.key = key;
+  P.unit = u;
+  P.mode = 'idle';
+  P.listen = false;
+  P.stops = [];
+  song.lastKey = key;
+  saveSong();
+  overlay.textContent = '';
+  seekUnitStart();
+  renderUnit();
+  renderMenu();
+  markStrip();
+}
+
+function seekUnitStart() {
+  const t = Math.max(0, P.unit.start - (P.unit.a === 0 && P.unit.start === 0 ? 0 : song.leadIn));
+  if (video.readyState > 0) video.currentTime = t;
+  else video.addEventListener('loadedmetadata', () => (video.currentTime = t), { once: true });
+}
+
+function renderUnit() {
+  const u = P.unit;
+  const st = L.getState(song, P.key);
+  $('#unitLabel').textContent = u.label;
+  $('#unitRange').textContent = `${fmt(u.start)}–${fmt(u.end)}`;
+  const pct = L.speedPercent(song, P.key);
+  const rate = L.rateFor(song, P.key);
+  $('#unitSpeed').textContent = `速さ ${pct}%` + (song.targetRate !== 1 ? `(動画×${+rate.toFixed(2)})` : '');
+  const need = P.key.startsWith('s:') ? song.streakToPass : song.chainStreak;
+  $('#unitDots').textContent = st.cleared ? '' : '●'.repeat(st.streak) + '○'.repeat(Math.max(0, need - st.streak));
+  let hint;
+  if (st.cleared) {
+    const days = st.next ? Math.max(0, Math.ceil((st.next - Date.now()) / L.DAY)) : 0;
+    hint = st.next && st.next <= Date.now() ? '復習の日です。1回弾いて確かめましょう。' : `合格済み。次の復習は${days}日後。`;
+  } else {
+    const rem = L.remainingOk(song, P.key);
+    const last = st.step >= song.steps.length - 1;
+    hint = last ? `◎ をあと${rem}回続けると合格` : `◎ をあと${rem}回続けると ${Math.round(song.steps[st.step + 1] * 100)}% へ`;
+    if (st.weak) hint = '止まった区間です。' + hint;
+  }
+  if (P.listen) hint = 'お手本を再生中(採点しません)';
+  $('#unitHint').textContent = hint;
+  $('#btnStopHere').hidden = u.kind === 'section';
+  updatePlayButtons();
+}
+
+function updatePlayButtons() {
+  const playing = !video.paused || P.mode === 'countdown';
+  $('#btnPlay').textContent = playing ? '⏸ 止める' : '▶ 再生';
+  $('#btnEditPlay').textContent = video.paused ? '▶' : '⏸';
+  $('.row.grade').classList.toggle('asking', P.mode === 'asking');
+}
+
+const KIND_LABEL = { review: '復習', weak: '止まった', practice: '練習中', new: '新しい', chain: 'つなぎ', full: '通し' };
+
+function renderMenu() {
+  const ol = $('#menu');
+  ol.textContent = '';
+  const now = Date.now();
+  const today = L.dateStr(now);
+  const items = L.buildMenu(song, now);
+  if (P.key && !items.some((x) => x.key === P.key)) items.unshift({ key: P.key, kind: 'pick' });
+  for (const it of items) {
+    const u = L.unitInfo(song, it.key);
+    const st = song.progress[it.key];
+    const n = st && st.td === today ? st.tn : 0;
+    const kind = it.kind === 'pick' ? null : it.kind;
+    const meta = `${L.speedPercent(song, it.key)}%` + (n ? ` ・ 今日${n}回` : '');
+    ol.append(
+      el('li', { class: it.key === P.key ? 'cur' : '', onclick: () => selectUnit(it.key) },
+        kind ? el('span', { class: 'tag tag-' + kind }, KIND_LABEL[kind]) : el('span', { class: 'tag tag-new' }, '選択中'),
+        el('span', { class: 'lbl' }, u.label),
+        el('span', { class: 'meta' }, meta))
+    );
+  }
+  if (!items.length) ol.append(el('li', {}, '今日の分は終わりです。通しで弾いてみましょう。'));
+}
+
+function cancelTimer() {
+  if (P.timer) {
+    clearInterval(P.timer);
+    P.timer = null;
+  }
+  if (P.mode === 'countdown') {
+    P.mode = 'idle';
+    overlay.textContent = '';
+  }
+}
+
+function countdown(sec, then) {
+  cancelTimer();
+  P.mode = 'countdown';
+  let n = Math.ceil(sec);
+  const show = () => {
+    overlay.textContent = '';
+    if (n > 0) overlay.append(el('div', { class: 'count' }, String(n)));
+  };
+  if (n <= 0) {
+    P.mode = 'idle';
+    then();
+    return;
+  }
+  show();
+  updatePlayButtons();
+  P.timer = setInterval(() => {
+    n--;
+    if (n <= 0) {
+      clearInterval(P.timer);
+      P.timer = null;
+      P.mode = 'idle';
+      overlay.textContent = '';
+      then();
+    } else show();
+  }, 1000);
+}
+
+function playUnit({ listen = false, fromStart = true } = {}) {
+  if (!P.unit || !video.src) return;
+  cancelTimer();
+  P.listen = listen;
+  overlay.textContent = '';
+  video.playbackRate = listen ? song.targetRate : L.rateFor(song, P.key);
+  if (fromStart) {
+    P.stops = [];
+    seekUnitStart();
+  }
+  P.mode = 'playing';
+  video.play().catch(() => {
+    P.mode = 'idle';
+    toast('再生できません。もう一度 ▶ を押してください');
+    updatePlayButtons();
+  });
+  renderUnit();
+}
+
+function onUnitEnd() {
+  video.pause();
+  if (P.listen) {
+    P.listen = false;
+    P.mode = 'idle';
+    seekUnitStart();
+    renderUnit();
+    return;
+  }
+  if ($('#autoLoop').checked) {
+    P.mode = 'idle';
+    countdown(song.gap, () => playUnit());
+    return;
+  }
+  P.mode = 'asking';
+  overlay.textContent = '';
+  overlay.append(el('div', { class: 'ask' }, 'どうだった？  ◎ △ ×'));
+  updatePlayButtons();
+}
+
+const EVENT_MSG = {
+  speedup: (pct) => `速さアップ！ ${pct}% へ`,
+  cleared: () => '合格！',
+  slowdown: (pct) => `少しゆっくりに戻します(${pct}%)`,
+  reviewed: () => '復習OK。次はもう少し先に',
+  'review-meh': () => '明日もう一度復習します',
+  relearn: () => '練習し直しましょう',
+};
+
+function doGrade(g) {
+  if (!P.unit || tab !== 'practice') return;
+  if (P.listen) return;
+  if (!video.paused) video.pause();
+  cancelTimer();
+  overlay.textContent = '';
+  const now = Date.now();
+  if (P.unit.kind !== 'section') L.recordRun(song, P.stops.map((i) => i + 1), now);
+  if (P.key === 'full' && P.stops.length && g === 'ok') g = 'meh';
+  const { event, state } = L.grade(song, P.key, g, now);
+  const today = L.dateStr(now);
+  state.tn = state.td === today ? state.tn + 1 : 1;
+  state.td = today;
+  saveSong();
+  renderStrip();
+  if (event) toast(EVENT_MSG[event](L.speedPercent(song, P.key)));
+  else toast({ ok: '◎', meh: '△', ng: '×' }[g], 900);
+
+  if (event === 'cleared' || event === 'reviewed' || event === 'review-meh') {
+    const next = L.buildMenu(song, now).find((x) => x.key !== P.key);
+    renderUnit();
+    renderMenu();
+    if (next) {
+      setTimeout(() => {
+        if (song && tab === 'practice' && P.mode === 'idle') {
+          selectUnit(next.key);
+          toast('次: ' + L.unitInfo(song, next.key).label);
+        }
+      }, 1600);
+    }
+    P.mode = 'idle';
+    updatePlayButtons();
+    return;
+  }
+  renderUnit();
+  renderMenu();
+  P.mode = 'idle';
+  countdown(song.gap, () => playUnit());
+}
+
+function stopHere() {
+  if (!P.unit || P.unit.kind === 'section') return;
+  const i = L.markStop(song, video.currentTime, Date.now());
+  if (!P.stops.includes(i)) P.stops.push(i);
+  saveSong();
+  renderStrip();
+  toast(`区間 ${i + 1} を練習に回します`);
+}
+
+function togglePlay() {
+  if (tab === 'edit') {
+    if (video.paused) video.play();
+    else video.pause();
+    return;
+  }
+  if (tab !== 'practice') return;
+  if (P.mode === 'countdown') {
+    cancelTimer();
+    updatePlayButtons();
+    return;
+  }
+  if (!video.paused) {
+    video.pause();
+    P.mode = 'idle';
+    return;
+  }
+  if (P.mode === 'asking') {
+    playUnit();
+    return;
+  }
+  const inside = video.currentTime >= P.unit.start - song.leadIn - 0.1 && video.currentTime < P.unit.end - 0.2;
+  playUnit({ fromStart: !inside });
+}
+
+// ---------- 区切りの編集 ----------
+
+function renderSecList() {
+  const box = $('#secList');
+  box.textContent = '';
+  const now = Date.now();
+  const ci = L.sectionIndexAt(song, video.currentTime);
+  song.sections.forEach((s, i) => {
+    box.append(
+      el('div', { class: 'secrow' + (i === ci ? ' cur' : '') },
+        el('span', { class: 'n st-' + L.sectionStatus(song, i, now) }, String(i + 1)),
+        el('span', { class: 't mono' }, `${fmt(s.start, true)} – ${fmt(s.end, true)}`),
+        el('button', { onclick: () => { video.currentTime = s.start; video.play(); } }, '▶'))
+    );
+    if (i < song.sections.length - 1) {
+      const edit = (fn) => () => {
+        if (fn()) {
+          saveSong();
+          renderStrip();
+          renderSecList();
+        }
+      };
+      box.append(
+        el('div', { class: 'bndrow' },
+          el('button', { onclick: edit(() => L.moveBoundary(song, i, -0.2)) }, '◀ 0.2'),
+          el('button', { onclick: () => { video.currentTime = Math.max(0, s.end - 2); video.play(); } }, '境目を聞く'),
+          el('button', { onclick: edit(() => L.moveBoundary(song, i, 0.2)) }, '0.2 ▶'),
+          el('button', { onclick: edit(() => L.removeBoundary(song, i)) }, '✕ 消す'))
+      );
+    }
+  });
+}
+
+// ---------- 記録 ----------
+
+function renderRecord() {
+  const box = $('#recordBody');
+  box.textContent = '';
+  const now = Date.now();
+  const o = L.overall(song);
+  const todaySec = log[L.dateStr(now)]?.songs?.[song.id] || 0;
+  let totalSec = 0;
+  for (const e of Object.values(log)) totalSec += e.songs?.[song.id] || 0;
+  box.append(
+    el('div', { class: 'bigstat' },
+      el('div', {}, el('b', {}, `${o.cleared}/${o.sections}`), el('span', {}, '合格した区間')),
+      el('div', {}, el('b', {}, o.fullCleared ? '合格' : 'まだ'), el('span', {}, '通し')),
+      el('div', {}, el('b', {}, `${L.streakDays(log, now)}日`), el('span', {}, '連続')))
+  );
+  box.append(
+    el('div', { class: 'bigstat', style: 'margin-top:8px' },
+      el('div', {}, el('b', {}, `${Math.round(todaySec / 60)}分`), el('span', {}, '今日この曲')),
+      el('div', {}, el('b', {}, `${(totalSec / 3600).toFixed(1)}時間`), el('span', {}, 'この曲の合計')))
+  );
+  box.append(el('h3', {}, '練習時間(この曲・14日)'));
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = now - i * L.DAY;
+    days.push({ d: new Date(d), sec: log[L.dateStr(d)]?.songs?.[song.id] || 0 });
+  }
+  const max = Math.max(600, ...days.map((x) => x.sec));
+  box.append(el('div', { class: 'bars' }, days.map((x) => el('div', { class: x.sec ? '' : 'zero', style: `height:${(x.sec / max) * 100}%`, title: `${Math.round(x.sec / 60)}分` }))));
+  box.append(el('div', { class: 'barlbl' }, days.map((x) => el('span', {}, String(x.d.getDate())))));
+  box.append(el('h3', {}, '区間の色'));
+  box.append(
+    el('div', { class: 'legend' },
+      [['new', 'まだ'], ['practice', '練習中'], ['cleared', '合格'], ['due', '復習の日'], ['weak', '止まった']].map(([k, t]) =>
+        el('span', {}, el('i', { class: 'st-' + k }), t)))
+  );
+  const runs = song.runs.filter((r) => r).slice(-10).reverse();
+  if (runs.length) {
+    box.append(el('h3', {}, 'つなぎ・通しの記録(新しい順)'));
+    box.append(
+      el('ul', { class: 'runs' },
+        runs.map((r) => {
+          const d = new Date(r.at);
+          return el('li', {}, `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')} ` + (r.stops.length ? `止まった区間 ${r.stops.join('・')}` : '止まらず'));
+        }))
+    );
+  }
+}
+
+// ---------- 設定 ----------
+
+function renderSettings() {
+  $('#setName').value = song.name;
+  $('#setTarget').value = String(song.targetRate);
+  if ($('#setTarget').value !== String(song.targetRate)) {
+    $('#setTarget').append(el('option', { value: String(song.targetRate) }, '×' + song.targetRate));
+    $('#setTarget').value = String(song.targetRate);
+  }
+  $('#setSteps').value = song.steps.map((x) => Math.round(x * 100)).join(',');
+  $('#setStreak').value = song.streakToPass;
+  $('#setChain').value = song.chainStreak;
+  $('#setLead').value = song.leadIn;
+  $('#setGap').value = song.gap;
+}
+
+function bindSettings() {
+  $('#setName').addEventListener('change', (e) => {
+    song.name = e.target.value.trim() || song.name;
+    $('#songTitle').textContent = song.name;
+    saveSong();
+  });
+  $('#setTarget').addEventListener('change', (e) => {
+    song.targetRate = Number(e.target.value);
+    saveSong();
+  });
+  $('#setSteps').addEventListener('change', (e) => {
+    const v = e.target.value
+      .split(/[,、\s]+/)
+      .map(Number)
+      .filter((x) => x >= 20 && x <= 200)
+      .sort((a, b) => a - b)
+      .map((x) => x / 100);
+    if (v.length) {
+      const last = song.steps.length - 1;
+      song.steps = v;
+      for (const st of Object.values(song.progress)) st.step = Math.min(st.step, v.length - 1);
+      if (last !== v.length - 1) toast('段階の数が変わりました');
+    }
+    renderSettings();
+    saveSong();
+  });
+  const num = (id, key, min, max) =>
+    $(id).addEventListener('change', (e) => {
+      const v = Number(e.target.value);
+      if (isFinite(v)) song[key] = Math.min(max, Math.max(min, v));
+      renderSettings();
+      saveSong();
+    });
+  num('#setStreak', 'streakToPass', 1, 10);
+  num('#setChain', 'chainStreak', 1, 10);
+  num('#setLead', 'leadIn', 0, 5);
+  num('#setGap', 'gap', 0, 10);
+  $('#btnAdjust').addEventListener('click', () => setAdjust(!adjusting));
+  $('#btnAdjustDone').addEventListener('click', () => setAdjust(false));
+  $('#btnZoomIn').addEventListener('click', () => zoomBy(1.2));
+  $('#btnZoomOut').addEventListener('click', () => zoomBy(1 / 1.2));
+  $('#btnZoomReset').addEventListener('click', () => {
+    song.crop = { s: 1, x: 0, y: 0 };
+    applyCrop();
+    saveSong();
+  });
+  $('#fileReplace').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      const d = await videoDuration(f);
+      if (Math.abs(d - song.duration) > 2 && !confirm(`前の動画と長さが違います(${fmt(song.duration)} → ${fmt(d)})。区切りがずれるかもしれません。入れ直しますか？`)) return;
+      await store.putVideo(song.id, f);
+      song.duration = d;
+      saveSong();
+      openSong(song.id);
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+  $('#btnResetProgress').addEventListener('click', () => {
+    if (!confirm('この曲の練習の記録(合格・速さ)を消します。区切りは残ります。')) return;
+    song.progress = {};
+    song.runs = [];
+    saveSong();
+    renderStrip();
+    selectUnit(L.sectionKey(song, 0));
+    toast('記録を消しました');
+  });
+  $('#btnDeleteSong').addEventListener('click', async () => {
+    if (!confirm(`「${song.name}」を動画ごと削除します。`)) return;
+    const id = song.id;
+    song = null;
+    await store.deleteSong(id);
+    showHome();
+  });
+}
+
+// ---------- イベント ----------
+
+function bind() {
+  $('#fileAdd').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) addVideo(f);
+  });
+  $('#btnExport').addEventListener('click', exportData);
+  $('#fileImport').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) importData(f);
+  });
+  $('#btnBack').addEventListener('click', showHome);
+  for (const b of $$('#tabs button')) b.addEventListener('click', () => setTab(b.dataset.tab));
+
+  $('#btnPlay').addEventListener('click', togglePlay);
+  $('#btnAgain').addEventListener('click', () => playUnit());
+  $('#btnListen').addEventListener('click', () => playUnit({ listen: true }));
+  for (const b of $$('.row.grade button')) b.addEventListener('click', () => doGrade(b.dataset.g));
+  $('#btnStopHere').addEventListener('click', stopHere);
+
+  $('#btnEditPlay').addEventListener('click', togglePlay);
+  for (const b of $$('[data-seek]')) {
+    b.addEventListener('click', () => {
+      video.currentTime = Math.min(song.duration, Math.max(0, video.currentTime + Number(b.dataset.seek)));
+    });
+  }
+  $('#editRate').addEventListener('change', (e) => (video.playbackRate = Number(e.target.value)));
+  $('#btnSplit').addEventListener('click', () => {
+    if (L.splitAt(song, video.currentTime)) {
+      saveSong();
+      renderStrip();
+      renderSecList();
+      toast(`${fmt(video.currentTime, true)} で区切りました`, 1200);
+    } else toast('区切りに近すぎます');
+  });
+  $('#btnResplit').addEventListener('click', () => {
+    if (!confirm('同じ長さで区切り直します。この曲の練習の記録は消えます。')) return;
+    L.resplit(song, Number($('#resplitLen').value));
+    saveSong();
+    renderStrip();
+    renderSecList();
+    P.key = L.sectionKey(song, 0);
+    P.unit = L.unitInfo(song, P.key);
+  });
+  bindSettings();
+
+  video.addEventListener('play', updatePlayButtons);
+  video.addEventListener('pause', updatePlayButtons);
+  video.addEventListener('loadedmetadata', fitStage);
+  video.addEventListener('ended', () => {
+    if (tab === 'practice' && P.mode === 'playing') onUnitEnd();
+  });
+  window.addEventListener('resize', () => song && fitStage());
+
+  document.addEventListener('keydown', (e) => {
+    if (!song || e.target.matches('input, select, textarea')) return;
+    const k = e.key;
+    if (k === ' ' || k === 'Enter') {
+      e.preventDefault();
+      togglePlay();
+    } else if (tab === 'practice' && (k === 'ArrowRight' || k === 'PageDown')) {
+      e.preventDefault();
+      doGrade('ok');
+    } else if (tab === 'practice' && (k === 'ArrowLeft' || k === 'PageUp')) {
+      e.preventDefault();
+      doGrade('ng');
+    } else if (tab === 'practice' && k === 'ArrowDown') {
+      e.preventDefault();
+      doGrade('meh');
+    } else if (tab === 'practice' && k === 'ArrowUp') {
+      e.preventDefault();
+      stopHere();
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (song) store.putSong(song).catch(() => {});
+      saveLog();
+    } else if (song) keepAwake();
+  });
+}
+
+// 練習時間を数える・区間の終わりを見張る
+let lastTick = performance.now();
+let unsavedSec = 0;
+function frame(now) {
+  if (song) {
+    if (tab === 'practice' && P.mode === 'playing' && P.unit && !video.paused) {
+      if (video.currentTime >= P.unit.end - 0.03 && P.unit.end < song.duration - 0.1) onUnitEnd();
+    }
+    updatePlayhead();
+    if (tab === 'edit') {
+      $('#editTime').textContent = `${fmt(video.currentTime, true)} / ${fmt(song.duration)}`;
+    }
+    const dt = (now - lastTick) / 1000;
+    if (!video.paused && dt < 1) {
+      unsavedSec += dt;
+      if (unsavedSec >= 5) {
+        L.addPractice(log, Date.now(), Math.round(unsavedSec), song.id);
+        unsavedSec = 0;
+        if (Math.random() < 0.3) saveLog();
+      }
+    }
+  }
+  lastTick = now;
+  requestAnimationFrame(frame);
+}
+
+let lastSecIdx = -1;
+setInterval(() => {
+  if (song && tab === 'edit') {
+    const i = L.sectionIndexAt(song, video.currentTime);
+    if (i !== lastSecIdx) {
+      lastSecIdx = i;
+      renderSecList();
+    }
+  }
+}, 400);
+
+async function init() {
+  bind();
+  log = await store.get('log', {});
+  await showHome();
+  requestAnimationFrame(frame);
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+}
+
+init();
