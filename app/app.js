@@ -813,6 +813,11 @@ function renderHand() {
 }
 
 function renderMidiStatus() {
+  for (const b of $$('.midibadge')) {
+    b.hidden = midi.status === 'unsupported';
+    b.classList.toggle('ok', midi.connected);
+    b.textContent = midi.connected ? '🎹 つながっています' : midi.status === 'init' ? '🎹 確認中…' : '🎹 未接続';
+  }
   const box = $('#midiStatus');
   if (!box) return;
   const t = {
@@ -919,7 +924,16 @@ function soundNotes(from, to) {
   }
 }
 
+const NOTE_NAMES = ['ド', 'ド#', 'レ', 'レ#', 'ミ', 'ファ', 'ファ#', 'ソ', 'ソ#', 'ラ', 'ラ#', 'シ'];
+let badgeTimer = null;
+function flashKey(p) {
+  for (const b of $$('.midibadge')) b.textContent = `🎹 ${NOTE_NAMES[p % 12]}(${Math.floor(p / 12) - 1})`;
+  clearTimeout(badgeTimer);
+  badgeTimer = setTimeout(renderMidiStatus, 1200);
+}
+
 function onMidiNoteOn(p) {
+  flashKey(p);
   P.pressed.set(p, 'free');
   if (!song || tab !== 'practice' || !hasNotes()) return;
   const tv = video.currentTime;
@@ -1236,6 +1250,13 @@ function bind() {
   midi.onNoteOn = onMidiNoteOn;
   midi.onNoteOff = (p) => P.pressed.delete(p);
   midi.onChange = renderMidiStatus;
+  for (const b of $$('.midibadge')) {
+    b.addEventListener('click', async () => {
+      await midi.request();
+      renderMidiStatus();
+      alert((midi.connected ? '電子ピアノにつながっています。' : '電子ピアノが見つかりません。ケーブルを挿し直し、ピアノの電源を入れてからもう一度押してください。') + '\n\n' + midi.diagnose());
+    });
+  }
 
   $('#btnEditPlay').addEventListener('click', togglePlay);
   for (const b of $$('[data-seek]')) {

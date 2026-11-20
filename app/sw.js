@@ -1,6 +1,6 @@
 // 一度開けば電波がなくても動くようにする。
 // 手元の控えをすぐ返し、裏で新しい版を取りに行く(次に開いたとき新しくなる)。
-const CACHE = 'piano-practice-v4';
+const CACHE = 'piano-practice-v5';
 const FILES = [
   './',
   'index.html',
