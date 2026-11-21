@@ -201,8 +201,8 @@ async function addNotesSong(file) {
     const duration = Math.max(nd.duration || 0, last + 1);
     const id = 'song' + Date.now();
     const name = (nd.source || file.name).replace(/\.(notes\.)?json$/i, '').replace(/\.[^.]+$/, '');
-    const s = L.newSong({ id, name, duration, now: Date.now() });
-    Object.assign(s, { noVideo: true, notes: nd, handFirst: true, handStreak: 2, tol: 0.25, sound: midi.output ? 'midi' : 'synth' });
+    const s = L.newSong({ id, name, duration, now: Date.now(), notes: nd });
+    Object.assign(s, { noVideo: true, handFirst: true, handStreak: 2, tol: 0.25, sound: midi.output ? 'midi' : 'synth' });
     await store.putSong(s);
     await store.persist();
     st.textContent = '';
@@ -1027,11 +1027,21 @@ async function importNotes(file) {
     if (nd.duration && Math.abs(nd.duration - song.duration) > 2 && !confirm(`動画の長さ(${fmt(song.duration)})と音符データの長さ(${fmt(nd.duration)})が違います。別の動画のデータかもしれません。取り込みますか？`)) return;
     const first = !song.notes;
     song.notes = nd;
+    let resplitMsg = '';
     if (first) {
       song.handFirst = true;
       song.handStreak = song.handStreak || 2;
       song.tol = song.tol || 0.25;
       song.sound = song.sound || 'video';
+      // まだ練習の記録がなければ、曲のまとまりで区切り直す
+      if (!Object.keys(song.progress).length && !song.runs.length) {
+        L.resplit(song, L.DEFAULTS.sectionLen);
+        P.key = L.sectionKey(song, 0);
+        P.unit = L.unitInfo(song, P.key);
+        renderStrip();
+        renderSecList();
+        resplitMsg = `・曲のまとまりで ${song.sections.length} 区間に区切りました`;
+      }
     }
     saveSong();
     lay = null;
@@ -1039,7 +1049,7 @@ async function importNotes(file) {
     P.hand = expectedHand();
     renderHand();
     const c = N.countHands(nd.notes);
-    toast(`音符 ${nd.notes.length}個を取り込みました(右手 ${c.R}・左手 ${c.L})`, 3000);
+    toast(`音符 ${nd.notes.length}個を取り込みました(右手 ${c.R}・左手 ${c.L})${resplitMsg}`, 3500);
   } catch (e) {
     alert('取り込めませんでした: ' + e.message);
   }
@@ -1340,13 +1350,18 @@ function bind() {
     } else toast('区切りに近すぎます');
   });
   $('#btnResplit').addEventListener('click', () => {
-    if (!confirm('同じ長さで区切り直します。この曲の練習の記録は消えます。')) return;
+    const how = hasNotes() ? '曲のまとまり(小節の頭など)で' : '同じ長さで';
+    if (!confirm(`${how}区切り直します。この曲の練習の記録は消えます。`)) return;
     L.resplit(song, Number($('#resplitLen').value));
     saveSong();
     renderStrip();
     renderSecList();
     P.key = L.sectionKey(song, 0);
     P.unit = L.unitInfo(song, P.key);
+    const bi = song.splitInfo;
+    const lens = song.sections.map((s) => s.end - s.start).sort((a, b) => a - b);
+    const per = bi ? `1区間 ≒ ${Math.round(lens[lens.length >> 1] / bi.bar)} 小節(${Math.round(lens[lens.length >> 1])}秒)` : '';
+    toast(`${song.sections.length} 区間に区切りました ${per}`, 3000);
   });
   bindSettings();
 
@@ -1448,7 +1463,7 @@ setInterval(() => {
 }, 400);
 
 async function init() {
-  globalThis.__pp = { P, midi, get media() { return video; } }; // 動作確認用
+  globalThis.__pp = { P, midi, get media() { return video; }, get song() { return song; } }; // 動作確認用
   setupVideoInputs();
   bind();
   midi.init();

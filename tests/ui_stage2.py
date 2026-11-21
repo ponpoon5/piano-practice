@@ -82,7 +82,7 @@ def text(id_):
     return js(f"return document.getElementById('{id_}').textContent")
 
 
-def run_unit(hand, mode, wait_s=17):
+def run_unit(hand, mode, wait_s=32):
     js("document.getElementById('btnAgain').click()")
     time.sleep(0.05)
     js("window.__play(arguments[0], arguments[1], arguments[2])", NOTES, hand, mode)
@@ -179,7 +179,7 @@ try:
     time.sleep(0.3)
 
     # 苦手な所: 右手の区間2を全部外して作る
-    d.find_element(By.CSS_SELECTOR, "#strip .sec:nth-child(3)").click()
+    js("const a = document.querySelectorAll('#strip .sec'); a[a.length - 1].click()")  # 区切りは小節の頭で決まるので本数は曲しだい
     time.sleep(0.5)
     r = run_unit("R", "wrong")
     time.sleep(2.0)

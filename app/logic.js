@@ -1,4 +1,5 @@
 // 練習の進め方(画面に依存しない部分)。node のテストからも読む。
+import { smartBoundaries } from './phrase.js';
 
 export const DAY = 86400000;
 export const REVIEW_DAYS = [1, 3, 7, 14, 30];
@@ -15,7 +16,7 @@ export const DEFAULTS = {
 
 // ---------- 曲 ----------
 
-export function newSong({ id, name, duration, now, sectionLen = DEFAULTS.sectionLen }) {
+export function newSong({ id, name, duration, now, sectionLen = DEFAULTS.sectionLen, notes = null }) {
   const song = {
     id,
     name,
@@ -34,6 +35,7 @@ export function newSong({ id, name, duration, now, sectionLen = DEFAULTS.section
     nextId: 1,
     lastKey: null,
   };
+  if (notes) song.notes = notes;
   song.sections = autoSplit(song, duration, sectionLen);
   return song;
 }
@@ -42,7 +44,15 @@ function newId(song) {
   return 'k' + song.nextId++;
 }
 
-export function autoSplit(song, duration, len) {
+// 音符データがあれば曲のまとまり(小節・フレーズ)で、なければ同じ長さで区切る
+export function autoSplit(song, duration, len, notes = song.notes && song.notes.notes) {
+  const sm = notes ? smartBoundaries(notes, duration, len) : null;
+  if (sm) {
+    const ts = [0, ...sm.times.map(round), round(duration)];
+    song.splitInfo = sm.bar ? { bar: Math.round(sm.bar.P * 100) / 100 } : null;
+    return ts.slice(0, -1).map((t, i) => ({ id: newId(song), start: t, end: ts[i + 1] }));
+  }
+  song.splitInfo = null;
   const out = [];
   let t = 0;
   while (t < duration - 0.01) {

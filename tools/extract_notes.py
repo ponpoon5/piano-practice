@@ -53,7 +53,18 @@ def sample_frames(cap, n_total, k=40, t0=0.0, t1=None, fps=30.0):
 def find_keyboard(med_gray: np.ndarray):
     """白鍵だけの帯・黒鍵の帯・音が当たる線の高さを返す。"""
     h, w = med_gray.shape
-    bright = (med_gray > 190).mean(axis=1)
+    # 白鍵が暗めに映る動画もある(コナン天国: 白鍵≒141)ので、画面の明るい所に合わせる
+    # 白鍵だけの段 = 暗い画素がなく、横に一様で明るめの行。その明るさを基準にする
+    rmean = med_gray.mean(axis=1)
+    rstd = med_gray.std(axis=1)
+    rdark = (med_gray < 70).mean(axis=1)
+    cand = np.where((rdark < 0.02) & (rstd < 30) & (rmean > 100))[0]
+    thr = 190
+    if len(cand):
+        cg = max(np.split(cand, np.where(np.diff(cand) > 1)[0] + 1), key=len)
+        if len(cg) >= 8:
+            thr = min(190, float(np.median(rmean[cg])) * 0.85)
+    bright = (med_gray > thr).mean(axis=1)
     dark = (med_gray < 70).mean(axis=1)
     white_rows = np.where(bright > 0.8)[0]
     if len(white_rows) == 0:
@@ -76,7 +87,7 @@ def find_keyboard(med_gray: np.ndarray):
     if by1 - by0 < 10:
         raise RuntimeError("黒鍵の帯が見つかりません")
     hit = by0 - 1
-    return dict(white_y0=wy0, white_y1=wy1, black_y0=by0, black_y1=by1, hit_y=hit)
+    return dict(white_y0=wy0, white_y1=wy1, black_y0=by0, black_y1=by1, hit_y=hit, white_thr=thr)
 
 
 def runs(mask: np.ndarray):
@@ -99,11 +110,13 @@ def find_keys(med_gray: np.ndarray, kb: dict, lowest: int | None = None):
     yb = (kb["black_y0"] + kb["black_y1"]) // 2
     yw = (kb["white_y0"] + kb["white_y1"]) // 2
     row_w = med_gray[yw].astype(float)
-    bright = row_w > 150
+    wthr = kb.get("white_thr", 190)
+    bright = row_w > min(150, wthr * 0.9)
     xs = np.where(bright)[0]
     xl, xr = int(xs[0]), int(xs[-1]) + 1
     # 白鍵の継ぎ目(少し暗い谷)
-    seams = [x for x in range(xl + 2, xr - 2) if row_w[x] < row_w[x - 1] and row_w[x] <= row_w[x + 1] and row_w[x] < 215]
+    seam_max = min(215, float(np.percentile(row_w[xl:xr], 90)) - 3)
+    seams = [x for x in range(xl + 2, xr - 2) if row_w[x] < row_w[x - 1] and row_w[x] <= row_w[x + 1] and row_w[x] < seam_max]
     d = np.diff(seams)
     d = d[(d > 6)]
     n0 = int(round((xr - xl) / float(np.median(d))))
@@ -158,7 +171,9 @@ def find_keys(med_gray: np.ndarray, kb: dict, lowest: int | None = None):
             centers.append(xl + j * ww)
     for c in centers:
         j = int(round((c - xl) / ww))  # 右側の白鍵
-        left = next(kk for kk in keys if abs(kk["x"] - (xl + (j - 0.5) * ww)) < 1)
+        left = next((kk for kk in keys if not kk["black"] and abs(kk["x"] - (xl + (j - 0.5) * ww)) < 1), None)
+        if left is None:  # 端からはみ出した黒鍵
+            continue
         keys.append(dict(p=left["p"] + 1, x=c, y=yb, black=True, w=ww * 0.55))
     keys.sort(key=lambda k: k["p"])
     return keys, dict(xl=xl, xr=xr, white_w=ww, n_white=n_white, n_black=len(centers), match=best[0])

@@ -82,7 +82,11 @@ try:
     check(js("return document.getElementById('soundSel').value") == "midi", "音は最初からピアノ")
     check(js("return document.getElementById('viewNotes').closest('label').hidden"), "「音符で表示」の切り替えは出さない")
     n = js("return document.querySelectorAll('#strip .sec').length")
-    check(n == 3, f"区間に分かれる ({n})")
+    check(n >= 2, f"区間に分かれる ({n})")
+    # 区切りは左手の低音が始まる所(小節の頭)のすぐ前
+    starts = js("return __pp.song.sections.slice(1).map(s => s.start)")
+    bass = [x["t"] for x in NOTES if x["h"] == "L"]
+    check(all(any(0 <= b - s < 0.12 for b in bass) for s in starts), f"区切りが小節の頭 {starts}")
     d.save_screenshot(str(out / "n1_open.png"))
 
     # 時計が進む
@@ -103,7 +107,7 @@ try:
     js("document.getElementById('btnAgain').click()")
     time.sleep(0.05)
     js("window.__play(arguments[0], 'R')", NOTES)
-    for _ in range(80):
+    for _ in range(160):
         time.sleep(0.25)
         if not js("return document.getElementById('result').hidden"):
             break
@@ -137,7 +141,7 @@ try:
     check(js("return window.__midi.sent.length") > before, "区切りの編集で流すと音が鳴る")
     d.find_element(By.ID, "btnSplit").click()
     time.sleep(0.3)
-    check(js("return document.querySelectorAll('#strip .sec').length") == 4, "区切りを足せる")
+    check(js("return document.querySelectorAll('#strip .sec').length") == n + 1, "区切りを足せる")
     d.save_screenshot(str(out / "n3_edit.png"))
 
     # 戻ってもう一度開ける・一覧に「音符のみ」

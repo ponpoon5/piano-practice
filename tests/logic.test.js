@@ -180,3 +180,45 @@ test('苦手な所: 足す・重ならない・続けて弾けたら消える', 
   assert.equal(s.spots.length, 0);
   assert.equal(L.unitInfo(s, k), null);
 });
+
+// 小節4秒・頭は2秒目から。左手は小節の頭に長い低音、右手は3連符(1/3秒ごと)を切れ目なく
+function barSong(bars = 16, P = 4, t0 = 2, drift = 0) {
+  const notes = [];
+  for (let b = 0; b < bars; b++) {
+    const s = t0 + b * (P + drift);
+    notes.push({ p: 37 + (b % 4), t: s, d: P - 0.1, h: 'L' });
+    for (let k = 0; k < 12; k++) notes.push({ p: 61 + ((k + b) % 5), t: s + (k * (P + drift)) / 12, d: 0.3, h: 'R' });
+  }
+  return { notes, duration: t0 + bars * (P + drift) + 2 };
+}
+
+test('音符があれば小節の頭で区切る(繰り返しの途中で切らない)', () => {
+  const { notes, duration } = barSong(16, 4, 2);
+  const s = L.newSong({ id: 'x', name: 't', duration, now: T0, sectionLen: 8, notes: { notes } });
+  const bounds = s.sections.slice(1).map((x) => x.start);
+  assert.ok(bounds.length >= 5);
+  for (const b of bounds) {
+    const bar = (b + 0.08 - 2) / 4; // 区切りは和音の少し前
+    assert.ok(Math.abs(bar - Math.round(bar)) < 0.03, `小節の頭でない: ${b}`);
+  }
+  // 目安8秒 = 2小節ずつ
+  const lens = s.sections.slice(1, -1).map((x) => Math.round((x.end - x.start) / 4));
+  assert.ok(lens.every((n) => n === 2), lens.join(','));
+  assert.ok(Math.abs(s.splitInfo.bar - 4) < 0.05);
+});
+
+test('テンポが少しずつずれても小節の頭を追う', () => {
+  const { notes, duration } = barSong(40, 4, 2, 0.02); // 1小節ごとに0.02秒ずつ遅くなる
+  const s = L.newSong({ id: 'x', name: 't', duration, now: T0, sectionLen: 8, notes: { notes } });
+  const heads = new Set(notes.filter((n) => n.h === 'L').map((n) => Math.round(n.t * 100)));
+  for (const x of s.sections.slice(1)) {
+    const near = [...heads].some((h) => Math.abs(h / 100 - (x.start + 0.08)) < 0.03);
+    assert.ok(near, `小節の頭でない: ${x.start}`);
+  }
+});
+
+test('音符がない曲はこれまで通り同じ長さ', () => {
+  const s = L.newSong({ id: 'x', name: 't', duration: 60, now: T0, sectionLen: 15 });
+  assert.deepEqual(s.sections.map((x) => x.start), [0, 15, 30, 45]);
+  assert.equal(s.splitInfo, null);
+});
