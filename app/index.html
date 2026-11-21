@@ -46,6 +46,7 @@
       </div>
       <div id="storageInfo" class="note"></div>
     </details>
+    <p class="note ver">版 v8</p>
   </main>
 </div>
 
@@ -208,6 +209,29 @@
   </main>
 </div>
 
+<!-- 確認・お知らせ(アプリによっては標準の確認窓が出ないため自前で出す) -->
+<div id="dlg" class="dlg" hidden>
+  <div class="dlgbox">
+    <p id="dlgMsg"></p>
+    <div class="row">
+      <button id="dlgNo">やめる</button>
+      <button id="dlgYes" class="primary">はい</button>
+    </div>
+  </div>
+</div>
+<div id="errbar" hidden></div>
+
+<script>
+  // 起動中に止まったら画面に出す(原因を伝えてもらうため)
+  window.__showErr = function (m) {
+    var b = document.getElementById('errbar');
+    if (!b) return;
+    b.hidden = false;
+    b.textContent = 'エラー: ' + m + '(この文を伝えてください)';
+  };
+  window.addEventListener('error', function (e) { window.__showErr((e.message || e) + (e.filename ? ' @' + e.filename.split('/').pop() + ':' + e.lineno : '')); });
+  window.addEventListener('unhandledrejection', function (e) { window.__showErr(e.reason && e.reason.message || String(e.reason)); });
+</script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

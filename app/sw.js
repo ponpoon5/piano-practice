@@ -1,6 +1,6 @@
 // 一度開けば電波がなくても動くようにする。
-// 手元の控えをすぐ返し、裏で新しい版を取りに行く(次に開いたとき新しくなる)。
-const CACHE = 'piano-practice-v7';
+// つながっているときは毎回いちばん新しい版を取りに行き(新旧の混ざりを防ぐ)、つながらないときだけ手元の控えを使う。
+const CACHE = 'piano-practice-v8';
 const FILES = [
   './',
   'index.html',
@@ -20,7 +20,13 @@ const FILES = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // ブラウザの控え(数分前の古い版)を使わず、必ず取り直す
+  e.waitUntil(
+    caches
+      .open(CACHE)
+      .then((c) => c.addAll(FILES.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -37,14 +43,15 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   e.respondWith(
     caches.open(CACHE).then(async (c) => {
-      const hit = await c.match(req, { ignoreSearch: true });
-      const net = fetch(req)
-        .then((res) => {
-          if (res.ok) c.put(req, res.clone());
-          return res;
-        })
-        .catch(() => hit);
-      return hit || net;
+      try {
+        const res = await fetch(req, { cache: 'no-cache' });
+        if (res.ok) c.put(req, res.clone());
+        return res;
+      } catch (err) {
+        const hit = await c.match(req, { ignoreSearch: true });
+        if (hit) return hit;
+        throw err;
+      }
     })
   );
 });

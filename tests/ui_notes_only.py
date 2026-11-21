@@ -152,6 +152,29 @@ try:
     time.sleep(1.0)
     check(not js("return document.getElementById('roll').hidden"), "開き直しても音符表示")
 
+    # Web MIDI Browser のように標準の確認窓が出ない(すぐ「いいえ」)場合でも、区切り直し・削除ができる
+    js("window.confirm = () => false; window.alert = () => {};")
+    d.find_element(By.CSS_SELECTOR, "#tabs [data-tab=edit]").click()
+    time.sleep(0.3)
+    js("document.querySelector('[data-tab=edit] details.more').open = true")
+    js("const s=document.getElementById('resplitLen'); s.value='30'; s.dispatchEvent(new Event('change'))")
+    before_n = js("return __pp.song.sections.length")
+    d.find_element(By.ID, "btnResplit").click()
+    time.sleep(0.3)
+    check(not js("return document.getElementById('dlg').hidden"), "区切り直しの確認をアプリ内で出す")
+    d.find_element(By.ID, "dlgYes").click()
+    time.sleep(0.5)
+    after_n = js("return __pp.song.sections.length")
+    check(after_n != before_n, f"区切り直せる ({before_n}→{after_n} 区間)")
+    d.find_element(By.CSS_SELECTOR, "#tabs [data-tab=settings]").click()
+    time.sleep(0.3)
+    d.find_element(By.ID, "btnDeleteSong").click()
+    time.sleep(0.3)
+    d.find_element(By.ID, "dlgYes").click()
+    time.sleep(1.0)
+    check(not js("return document.getElementById('home').hidden") and js("return document.querySelectorAll('.songcard').length") == 0, "曲を削除できる")
+    check(js("return document.getElementById('errbar').hidden"), "エラー表示なし")
+
     sev = [l for l in d.get_log("browser") if l.get("level") == "SEVERE"]
     check(not sev, "コンソールにエラーなし " + str(sev[:3]))
 finally:

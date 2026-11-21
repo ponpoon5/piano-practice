@@ -76,6 +76,26 @@ function toast(msg, ms = 2200) {
   toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
+// 確認・お知らせ。Web MIDI Browser などでは標準の confirm/alert が出ず「いいえ」扱いになるので自前で出す
+function dialog(msg, okOnly) {
+  return new Promise((resolve) => {
+    const d = $('#dlg');
+    $('#dlgMsg').textContent = msg;
+    $('#dlgNo').hidden = !!okOnly;
+    $('#dlgYes').textContent = okOnly ? 'OK' : 'はい';
+    d.hidden = false;
+    const done = (v) => {
+      d.hidden = true;
+      $('#dlgYes').onclick = $('#dlgNo').onclick = null;
+      resolve(v);
+    };
+    $('#dlgYes').onclick = () => done(true);
+    $('#dlgNo').onclick = () => done(false);
+  });
+}
+const ask = (msg) => dialog(msg, false);
+const inform = (msg) => dialog(msg, true);
+
 let saveTimer = null;
 function saveSong() {
   if (!song) return;
@@ -246,7 +266,7 @@ async function importData(file) {
     for (const s of data.songs || []) if (!(await store.video(s.id))) missing.push(s.name);
     if (missing.length) $('#addStatus').textContent = '動画がない曲: ' + missing.join('、') + '(曲の「設定」から動画を入れ直してください)';
   } catch (e) {
-    alert('読み込めませんでした: ' + e.message);
+    inform('読み込めませんでした: ' + e.message);
   }
 }
 
@@ -1024,7 +1044,7 @@ function onMidiNoteOn(p) {
 async function importNotes(file) {
   try {
     const nd = N.parseNotesFile(await file.text());
-    if (nd.duration && Math.abs(nd.duration - song.duration) > 2 && !confirm(`動画の長さ(${fmt(song.duration)})と音符データの長さ(${fmt(nd.duration)})が違います。別の動画のデータかもしれません。取り込みますか？`)) return;
+    if (nd.duration && Math.abs(nd.duration - song.duration) > 2 && !(await ask(`動画の長さ(${fmt(song.duration)})と音符データの長さ(${fmt(nd.duration)})が違います。別の動画のデータかもしれません。取り込みますか？`))) return;
     const first = !song.notes;
     song.notes = nd;
     let resplitMsg = '';
@@ -1051,7 +1071,7 @@ async function importNotes(file) {
     const c = N.countHands(nd.notes);
     toast(`音符 ${nd.notes.length}個を取り込みました(右手 ${c.R}・左手 ${c.L})${resplitMsg}`, 3500);
   } catch (e) {
-    alert('取り込めませんでした: ' + e.message);
+    inform('取り込めませんでした: ' + e.message);
   }
 }
 
@@ -1216,18 +1236,18 @@ function bindSettings() {
     const f = asVideo(picked);
     try {
       const d = await videoDuration(f);
-      if (Math.abs(d - song.duration) > 2 && !confirm(`前の動画と長さが違います(${fmt(song.duration)} → ${fmt(d)})。区切りがずれるかもしれません。入れ直しますか？`)) return;
+      if (Math.abs(d - song.duration) > 2 && !(await ask(`前の動画と長さが違います(${fmt(song.duration)} → ${fmt(d)})。区切りがずれるかもしれません。入れ直しますか？`))) return;
       await store.putVideo(song.id, f);
       song.duration = d;
       song.noVideo = false;
       saveSong();
       openSong(song.id);
     } catch (err) {
-      alert(err.message);
+      inform(err.message);
     }
   });
-  $('#btnResetProgress').addEventListener('click', () => {
-    if (!confirm('この曲の練習の記録(合格・速さ)を消します。区切りは残ります。')) return;
+  $('#btnResetProgress').addEventListener('click', async () => {
+    if (!(await ask('この曲の練習の記録(合格・速さ)を消します。区切りは残ります。'))) return;
     song.progress = {};
     song.runs = [];
     saveSong();
@@ -1236,7 +1256,7 @@ function bindSettings() {
     toast('記録を消しました');
   });
   $('#btnDeleteSong').addEventListener('click', async () => {
-    if (!confirm(`「${song.name}」を動画ごと削除します。`)) return;
+    if (!(await ask(`「${song.name}」を${song.noVideo ? '' : '動画ごと'}削除します。`))) return;
     const id = song.id;
     song = null;
     await store.deleteSong(id);
@@ -1303,8 +1323,8 @@ function bind() {
     e.target.value = '';
     if (f) importNotes(f);
   });
-  $('#btnNotesRemove').addEventListener('click', () => {
-    if (!confirm('この曲の音符データを外します(練習の記録は残ります)。')) return;
+  $('#btnNotesRemove').addEventListener('click', async () => {
+    if (!(await ask('この曲の音符データを外します(練習の記録は残ります)。'))) return;
     delete song.notes;
     song.handFirst = false;
     for (const st of Object.values(song.progress)) st.phase = 'B';
@@ -1330,7 +1350,7 @@ function bind() {
     b.addEventListener('click', async () => {
       await midi.request();
       renderMidiStatus();
-      alert((midi.connected ? '電子ピアノにつながっています。' : '電子ピアノが見つかりません。ケーブルを挿し直し、ピアノの電源を入れてからもう一度押してください。') + '\n\n' + midi.diagnose());
+      inform((midi.connected ? '電子ピアノにつながっています。' : '電子ピアノが見つかりません。ケーブルを挿し直し、ピアノの電源を入れてからもう一度押してください。') + '\n\n' + midi.diagnose());
     });
   }
 
@@ -1349,9 +1369,9 @@ function bind() {
       toast(`${fmt(video.currentTime, true)} で区切りました`, 1200);
     } else toast('区切りに近すぎます');
   });
-  $('#btnResplit').addEventListener('click', () => {
+  $('#btnResplit').addEventListener('click', async () => {
     const how = hasNotes() ? '曲のまとまり(小節の頭など)で' : '同じ長さで';
-    if (!confirm(`${how}区切り直します。この曲の練習の記録は消えます。`)) return;
+    if (!(await ask(`${how}区切り直します。この曲の練習の記録は消えます。`))) return;
     L.resplit(song, Number($('#resplitLen').value));
     saveSong();
     renderStrip();
@@ -1464,14 +1484,37 @@ setInterval(() => {
 
 async function init() {
   globalThis.__pp = { P, midi, get media() { return video; }, get song() { return song; } }; // 動作確認用
-  setupVideoInputs();
-  bind();
-  midi.init();
-  log = await store.get('log', {});
+  // 1か所で失敗しても、ピアノの接続やほかのボタンは動くようにする
+  const safe = (name, f) => {
+    try {
+      return f();
+    } catch (e) {
+      console.error(e);
+      if (globalThis.__showErr) globalThis.__showErr(`${name}: ${e.message}`);
+    }
+  };
+  safe('動画', setupVideoInputs);
+  safe('ボタン', bind);
+  if (!midi.onNoteOn) {
+    midi.onNoteOn = onMidiNoteOn;
+    midi.onNoteOff = (p) => P.pressed.delete(p);
+    midi.onChange = renderMidiStatus;
+  }
+  safe('ピアノ', () => midi.init());
+  log = await store.get('log', {}).catch(() => ({}));
   await showHome();
   requestAnimationFrame(frame);
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    // 新しい版に入れ替わったら1回だけ開き直す(古い画面と新しい処理が混ざらないように)
+    const had = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (had && !reloaded) {
+        reloaded = true;
+        location.reload();
+      }
+    });
+    navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
   }
 }
 
