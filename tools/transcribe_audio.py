@@ -86,6 +86,50 @@ def assign_hands(notes, posL=45.0, posR=65.0):
     return sorted(notes, key=lambda n: (n['t'], n['p']))
 
 
+def finger_release(notes, pedals=(), fingers=5, reach=12, pedal_max=1.0):
+    """音の長さを「指が鍵盤を押している長さ」に直す。録音ではペダルで鳴り続ける音も
+    押したままに聞こえ、コナン天国では同時に最大48鍵押しっぱなしになった。
+    片手で同時に押せるのは5鍵まで(古い方から離す)、手が届く幅(12半音)より離れた音を
+    弾いたら、それまでの音は離している、として切る。同じ鍵を次に弾く前にも離す。
+    ペダルを踏んでいる間は音からは指を離したか分からないので、同じ手の次の音で離す
+    (最後の音は pedal_max 秒まで)。コナン天国はペダル率93%。"""
+    notes = sorted(notes, key=lambda n: (n['t'], n['p']))
+    ped = sorted((p['on'], p['off']) for p in pedals)
+
+    def pedal_at(t):
+        return any(on <= t < off for on, off in ped)
+    for hand in ('L', 'R'):
+        held = []  # 押している音(始まり順)
+        hs = [n for n in notes if n['h'] == hand]
+        i = 0
+        while i < len(hs):
+            t = hs[i]['t']
+            g = []
+            while i < len(hs) and hs[i]['t'] - t <= 0.05:
+                g.append(hs[i])
+                i += 1
+            held = [h for h in held if h['t'] + h['d'] > t]
+
+            def cut(h):
+                h['d'] = round(max(0.05, t - h['t'] - 0.02), 3)
+
+            ps = [n['p'] for n in g]
+            under = pedal_at(t)
+            keep = []
+            for h in held:
+                if under or h['p'] in ps or any(abs(h['p'] - p) > reach for p in ps):
+                    cut(h)
+                else:
+                    keep.append(h)
+            while len(keep) + len(g) > fingers and keep:
+                cut(keep.pop(0))
+            held = keep + g
+        for h in held:  # この手の最後の音
+            if pedal_at(h['t'] + 0.1):
+                h['d'] = min(h['d'], pedal_max)
+    return notes
+
+
 def to_notes(events, min_vel=0):
     out = []
     for e in events:
@@ -107,6 +151,7 @@ def main():
     ap.add_argument('--keep-overtones', action='store_true', help='倍音らしい音を捨てない')
     ap.add_argument('--keep-lead', action='store_true', help='頭の無音を詰めない(元の動画と時刻を合わせる)')
     ap.add_argument('--end', type=float, help='この秒より後の音は捨てる(繰り返し部分を省くなど)')
+    ap.add_argument('--keep-sustain', action='store_true', help='ペダルで鳴り続ける長さのまま(押している長さに直さない)')
     a = ap.parse_args()
     out = a.out or os.path.splitext(a.input)[0] + '.audio.notes.json'
     raw_path = os.path.splitext(out)[0] + '.raw.json'
@@ -132,6 +177,8 @@ def main():
     if not a.keep_overtones:
         sel = drop_overtones(sel)
     notes = assign_hands(sel)
+    if not a.keep_sustain:
+        notes = finger_release(notes, pedal_list)
     # 頭の無音(題名画面など)を詰めて、最初の音を1秒目にする。動画と合わせたいときは --keep-lead
     lead = 0.0
     if not a.keep_lead and notes:

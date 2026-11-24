@@ -22,5 +22,6 @@
     work\ptvenv\Scripts\python tools\transcribe_audio.py 演奏.mp4 -o 演奏.notes.json
 
 CPUで曲の長さの約1.7倍かかる。倍音の聞き違いを捨て、左右の手は音の高さと流れから推定する。
+音の長さは「指で押している長さ」に直す(片手5鍵まで・1オクターブより離れたら離す・ペダル中は同じ手の次の音で離す)。鳴っている長さのままにするなら `--keep-sustain`。
 月光第1楽章(動画から読んだ正解1146音)との突き合わせ: 拾えた 98.2%・余分でない 99.3%・左右一致 98.0%
 (`python tools\compare_notes.py 正解.notes.json 推定.notes.json`)。
